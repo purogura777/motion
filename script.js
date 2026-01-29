@@ -9,8 +9,7 @@ const BGM_PATH = 'music/bgm.mp3';
 const DIFFICULTY_THRESHOLD = { easy: 0.40, normal: 0.50, hard: 0.60 };
 const COOLDOWN_MS = 2500;
 const MIN_KEYPOINT_SCORE = 0.25;
-const PHOTO_COOLDOWN_MS = 3000;
-const MIN_POSE_SCORE_FOR_PHOTO = 0.5;
+const MOTION_THRESHOLD = 15;
 
 const COCO_KEYPOINT_NAMES = [
   'nose', 'left_eye', 'right_eye', 'left_ear', 'right_ear',
@@ -42,8 +41,7 @@ let playerCooldownUntil = [0, 0, 0, 0];
 let lastPlayerPoses = [null, null, null, null];
 let lastJudgeResult = [null, null, null, null];
 let gameStarted = false;
-let lastPhotoTime = 0;
-let photoCanvas = null;
+let previousPosePositions = [null, null, null, null];
 
 const video = document.getElementById('webcam');
 const statusEl = document.getElementById('status');
@@ -221,31 +219,21 @@ function startBgm() {
   });
 }
 
-function takePhoto() {
-  var now = Date.now();
-  if (now - lastPhotoTime < PHOTO_COOLDOWN_MS) return;
-  if (!photoCanvas) {
-    photoCanvas = document.createElement('canvas');
-    photoCanvas.width = video.videoWidth || 400;
-    photoCanvas.height = video.videoHeight || 300;
+function calculateMotion(prevPose, currentPose) {
+  if (!prevPose || !currentPose || !prevPose.keypoints || !currentPose.keypoints) return 0;
+  var totalMovement = 0;
+  var count = 0;
+  for (var i = 0; i < currentPose.keypoints.length; i++) {
+    var currKp = currentPose.keypoints[i];
+    if (!currKp || !currKp.score || currKp.score < MIN_KEYPOINT_SCORE) continue;
+    var prevKp = prevPose.keypoints.find(function (k) { return k && k.name === currKp.name; });
+    if (!prevKp || !prevKp.score || prevKp.score < MIN_KEYPOINT_SCORE) continue;
+    var dx = currKp.x - prevKp.x;
+    var dy = currKp.y - prevKp.y;
+    totalMovement += Math.sqrt(dx * dx + dy * dy);
+    count++;
   }
-  var ctx = photoCanvas.getContext('2d');
-  ctx.save();
-  ctx.scale(-1, 1);
-  ctx.drawImage(video, -photoCanvas.width, 0, photoCanvas.width, photoCanvas.height);
-  ctx.restore();
-  photoCanvas.toBlob(function (blob) {
-    if (!blob) return;
-    var url = URL.createObjectURL(blob);
-    var a = document.createElement('a');
-    a.href = url;
-    a.download = 'pose_' + new Date().toISOString().replace(/[:.]/g, '-') + '.jpg';
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-    lastPhotoTime = now;
-  }, 'image/jpeg', 0.9);
+  return count > 0 ? totalMovement / count : 0;
 }
 
 function initDifficultyButtons() {
@@ -307,32 +295,60 @@ function drawOverlay(assignedPoses) {
     var pose = assignedPoses[p];
     if (!pose || !pose.keypoints) continue;
     var kp = pose.keypoints;
-    var leftS = kp.find(function (k) { return k.name === 'left_shoulder'; });
-    var rightS = kp.find(function (k) { return k.name === 'right_shoulder'; });
-    var leftH = kp.find(function (k) { return k.name === 'left_hip'; });
-    var rightH = kp.find(function (k) { return k.name === 'right_hip'; });
-    if (!leftS || !rightS) continue;
-    var minX = Math.min(leftS.x, rightS.x);
-    var maxX = Math.max(leftS.x, rightS.x);
-    var centerX = (minX + maxX) / 2;
-    var minY = (leftS.y + rightS.y) / 2;
-    if (leftH && rightH) minY = Math.min(minY, leftH.y, rightH.y);
-    var boxH = 80;
-    var boxY = Math.max(0, minY - boxH - 10);
-    var boxX = w - centerX + 40;
-    ctx.fillStyle = 'rgba(0,0,0,0.6)';
-    ctx.fillRect(boxX, boxY, 80, boxH);
-    ctx.fillStyle = '#fff';
-    ctx.font = '14px Arial';
-    ctx.fillText('P' + (p + 1), boxX + 4, boxY + 18);
-    ctx.fillText('' + playerScores[p], boxX + 4, boxY + 36);
-    var result = lastJudgeResult[p];
-    if (result === true) {
-      ctx.fillStyle = '#4CAF50';
-      ctx.fillText('OK', boxX + 4, boxY + 54);
-    } else if (result === false) {
-      ctx.fillStyle = '#f44336';
-      ctx.fillText('X', boxX + 4, boxY + 54);
+    var prevPose = previousPosePositions[p];
+    var motion = calculateMotion(prevPose, pose);
+    var isMoving = motion > MOTION_THRESHOLD;
+    var color = isMoving ? '#f44336' : '#4CAF50';
+    var minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    for (var i = 0; i < kp.length; i++) {
+      var k = kp[i];
+      if (!k || !k.score || k.score < MIN_KEYPOINT_SCORE) continue;
+      minX = Math.min(minX, k.x);
+      maxX = Math.max(maxX, k.x);
+      minY = Math.min(minY, k.y);
+      maxY = Math.max(maxY, k.y);
+    }
+    if (minX === Infinity) continue;
+    var padding = 20;
+    var boxX = w - maxX - padding;
+    var boxY = minY - padding;
+    var boxW = maxX - minX + padding * 2;
+    var boxH = maxY - minY + padding * 2;
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 3;
+    ctx.strokeRect(boxX, boxY, boxW, boxH);
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2;
+    for (var j = 0; j < SKELETON_EDGES.length; j++) {
+      var edge = SKELETON_EDGES[j];
+      var kp1 = kp.find(function (k) { return k && k.name === edge[0]; });
+      var kp2 = kp.find(function (k) { return k && k.name === edge[1]; });
+      if (!kp1 || !kp2 || !kp1.score || !kp2.score || kp1.score < MIN_KEYPOINT_SCORE || kp2.score < MIN_KEYPOINT_SCORE) continue;
+      ctx.beginPath();
+      ctx.moveTo(w - kp1.x, kp1.y);
+      ctx.lineTo(w - kp2.x, kp2.y);
+      ctx.stroke();
+    }
+    ctx.fillStyle = color;
+    for (var k = 0; k < kp.length; k++) {
+      var keypoint = kp[k];
+      if (!keypoint || !keypoint.score || keypoint.score < MIN_KEYPOINT_SCORE) continue;
+      ctx.beginPath();
+      ctx.arc(w - keypoint.x, keypoint.y, 4, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    var leftS = kp.find(function (k) { return k && k.name === 'left_shoulder'; });
+    var rightS = kp.find(function (k) { return k && k.name === 'right_shoulder'; });
+    if (leftS && rightS) {
+      var centerX = w - (leftS.x + rightS.x) / 2;
+      var labelY = Math.max(0, Math.min(leftS.y, rightS.y) - 10);
+      ctx.fillStyle = 'rgba(0,0,0,0.6)';
+      ctx.fillRect(centerX - 30, labelY - 20, 60, 20);
+      ctx.fillStyle = '#fff';
+      ctx.font = '14px Arial';
+      ctx.textAlign = 'center';
+      ctx.fillText('P' + (p + 1), centerX, labelY - 5);
+      ctx.textAlign = 'left';
     }
   }
 }
@@ -348,30 +364,16 @@ async function detect() {
       requestAnimationFrame(detect);
       return;
     }
-    var hasValidPose = false;
-    for (var i = 0; i < poses.length; i++) {
-      var pose = poses[i];
-      var keypoints = pose.keypoints || [];
-      var validKeypointCount = 0;
-      for (var j = 0; j < keypoints.length; j++) {
-        var kp = keypoints[j];
-        if (kp && kp.score && kp.score >= MIN_KEYPOINT_SCORE) {
-          validKeypointCount++;
-        }
-      }
-      if (validKeypointCount >= 8) {
-        hasValidPose = true;
-        break;
-      }
-    }
-    if (hasValidPose) {
-      takePhoto();
-    }
     var assigned = assignPlayers(poses);
     var target = TARGET_POSES[currentTargetIndex];
     var threshold = DIFFICULTY_THRESHOLD[currentDifficulty] || 0.8;
     var now = Date.now();
     for (var p = 0; p < 4; p++) {
+      if (assigned[p]) {
+        previousPosePositions[p] = JSON.parse(JSON.stringify(assigned[p]));
+      } else {
+        previousPosePositions[p] = null;
+      }
       lastPlayerPoses[p] = assigned[p];
       lastJudgeResult[p] = null;
       if (!assigned[p] || !target || !target.keypoints) continue;
