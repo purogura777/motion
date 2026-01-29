@@ -297,20 +297,22 @@ function drawOverlay(assignedPoses) {
     var pose = assignedPoses[p];
     if (!pose || !pose.keypoints) continue;
     var kp = pose.keypoints;
-    var prevPose = previousPosePositions[p];
-    var motion = calculateMotion(prevPose, pose);
-    var isMoving = motion > MOTION_THRESHOLD;
-    var color = isMoving ? '#f44336' : '#4CAF50';
+    var validKeypointCount = 0;
     var minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
     for (var i = 0; i < kp.length; i++) {
       var k = kp[i];
       if (!k || !k.score || k.score < MIN_KEYPOINT_SCORE) continue;
+      validKeypointCount++;
       minX = Math.min(minX, k.x);
       maxX = Math.max(maxX, k.x);
       minY = Math.min(minY, k.y);
       maxY = Math.max(maxY, k.y);
     }
-    if (minX === Infinity) continue;
+    if (minX === Infinity || validKeypointCount < 3) continue;
+    var prevPose = previousPosePositions[p];
+    var motion = calculateMotion(prevPose, pose);
+    var isMoving = motion > MOTION_THRESHOLD;
+    var color = isMoving ? '#f44336' : '#4CAF50';
     var padding = 20;
     var boxX = w - maxX - padding;
     var boxY = minY - padding;
