@@ -6,7 +6,7 @@
     <style>
         body { font-family: 'Arial', sans-serif; background: #f0f2f5; margin: 0; display: flex; flex-direction: column; align-items: center; }
         h1 { margin: 10px 0; }
-        .scores { display: flex; gap: 15px; margin: 10px 0; flex-wrap: wrap; justify-content: center; }
+        .scores { display: flex; gap: 15px; margin: 10px 0; flex-wrap: nowrap; justify-content: center; }
         .score-card { min-width: 80px; padding: 10px 15px; border-radius: 10px; background: white; text-align: center; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
         .score-card .label { font-size: 0.9rem; color: #666; }
         .score-card .point { font-size: 1.8rem; font-weight: bold; color: #333; }
@@ -18,8 +18,8 @@
         .target-area h3 { margin: 0 0 10px 0; font-size: 1rem; }
         #targetCanvas { width: 160px; height: 200px; margin: 0 auto; display: block; background: #fafafa; border-radius: 6px; }
         .camera-area { position: relative; display: inline-block; }
-        #webcam { width: 400px; height: 300px; transform: scaleX(-1); border-radius: 10px; display: block; }
-        #overlayCanvas { position: absolute; left: 0; top: 0; width: 400px; height: 300px; transform: scaleX(-1); pointer-events: none; }
+        #webcam { width: 560px; height: 420px; transform: scaleX(-1); border-radius: 10px; display: block; object-fit: contain; }
+        #overlayCanvas { position: absolute; left: 0; top: 0; width: 560px; height: 420px; transform: scaleX(-1); pointer-events: none; }
         #status { font-size: 1rem; margin-top: 8px; min-height: 1.2rem; color: #666; }
         #nextPoseBtn { margin-top: 10px; padding: 8px 16px; border-radius: 8px; border: 1px solid #2196F3; background: #2196F3; color: white; cursor: pointer; }
     </style>

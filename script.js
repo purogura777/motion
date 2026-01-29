@@ -6,7 +6,7 @@
  */
 
 const BGM_PATH = 'music/bgm.mp3';
-const DIFFICULTY_THRESHOLD = { easy: 0.40, normal: 0.50, hard: 0.60 };
+const DIFFICULTY_THRESHOLD = { easy: 0.65, normal: 0.80, hard: 0.90 };
 const COOLDOWN_MS = 2500;
 const MIN_KEYPOINT_SCORE = 0.25;
 const MOTION_THRESHOLD = 15;
@@ -57,6 +57,8 @@ let lastPlayerPoses = [null, null, null, null];
 let lastJudgeResult = [null, null, null, null];
 let gameStarted = false;
 let previousPosePositions = [null, null, null, null];
+let smoothedKeypoints = [null, null, null, null];
+const SMOOTH_ALPHA = 0.88;
 
 const video = document.getElementById('webcam');
 const statusEl = document.getElementById('status');
@@ -130,7 +132,7 @@ function poseSimilarity(normUser, targetKeypoints) {
     var dx = tu.x - tt.x;
     var dy = tu.y - tt.y;
     var dist = Math.sqrt(dx * dx + dy * dy);
-    sum += Math.max(0, 1 - dist * 0.8);
+    sum += Math.max(0, 1 - dist * 1.6);
     count++;
   }
   if (count === 0) return 0;
@@ -397,21 +399,40 @@ function drawOverlay(assignedPoses) {
 
     for (var p = 0; p < assignedPoses.length; p++) {
       var pose = assignedPoses[p];
-      if (!pose || !pose.keypoints) continue;
+      if (!pose || !pose.keypoints) {
+        smoothedKeypoints[p] = null;
+        continue;
+      }
       
       var kp = pose.keypoints;
-      
+
       // 座標変換（鏡写し）
-      var km = {};
+      var rawKm = {};
       var validCount = 0;
       kp.forEach(function(k) {
         if (k.score > MIN_KEYPOINT_SCORE) {
-          km[k.name] = { x: w - k.x, y: k.y }; 
+          rawKm[k.name] = { x: w - k.x, y: k.y };
           validCount++;
         }
       });
-      
+
       if (validCount < 5) continue;
+
+      // スムージング（ゆらぎ軽減）
+      var prev = smoothedKeypoints[p];
+      var km = {};
+      for (var name in rawKm) {
+        var raw = rawKm[name];
+        if (prev && prev[name]) {
+          km[name] = {
+            x: prev[name].x * SMOOTH_ALPHA + raw.x * (1 - SMOOTH_ALPHA),
+            y: prev[name].y * SMOOTH_ALPHA + raw.y * (1 - SMOOTH_ALPHA)
+          };
+        } else {
+          km[name] = { x: raw.x, y: raw.y };
+        }
+      }
+      smoothedKeypoints[p] = km;
 
       // --- 描画ヘルパー ---
       function drawLine(p1, p2, color) {
@@ -485,11 +506,12 @@ function drawOverlay(assignedPoses) {
 
       // --- 3. 顔とラベル ---
       var faceParts = ['nose', 'left_eye', 'right_eye', 'left_ear', 'right_ear'];
-      var fx = 0, fy = 0, fCount = 0;
+      var fx = 0, fy = 0, minFaceY = Infinity, fCount = 0;
       faceParts.forEach(function(name) {
         if (km[name]) {
           fx += km[name].x;
           fy += km[name].y;
+          if (km[name].y < minFaceY) minFaceY = km[name].y;
           fCount++;
         }
       });
@@ -498,12 +520,14 @@ function drawOverlay(assignedPoses) {
       if (fCount === 0 && shoulderCenter) {
         fx = shoulderCenter.x;
         fy = shoulderCenter.y - 50;
+        minFaceY = shoulderCenter.y - 80;
         fCount = 1;
       }
 
       if (fCount > 0) {
         var faceX = fx / fCount;
         var faceY = fy / fCount;
+        if (minFaceY === Infinity) minFaceY = faceY;
 
         // 顔の円
         ctx.beginPath();
@@ -514,27 +538,22 @@ function drawOverlay(assignedPoses) {
         ctx.fillStyle = 'rgba(255, 255, 255, 0.3)';
         ctx.fill();
 
-        // ★ラベル表示（画面外に行かないように調整）
+        // ラベル：頭のてっぺんの上（顔キーポイントの最上部より上に配置）
         ctx.fillStyle = STYLE.labelColor;
         ctx.font = STYLE.labelFont;
         ctx.textAlign = 'center';
-        
-        // 基本位置：頭の上
-        var labelY = faceY - STYLE.headRadius - STYLE.labelMargin;
-        var textMetrics = ctx.measureText('P' + (p + 1));
-        var textHeight = 24; // フォントサイズ相当
+        ctx.textBaseline = 'bottom';
 
-        // もし画面上端より上に行ってしまうなら、位置を調整
-        if (labelY < textHeight) {
-          // 画面上端ギリギリに留めるか、顔の下に出すか。
-          // ここでは「顔の下（首元あたり）」に出すように切り替えます。
-          ctx.textBaseline = 'top';
-          labelY = faceY + STYLE.headRadius + 10;
-        } else {
-          ctx.textBaseline = 'bottom';
-        }
+        var labelY = minFaceY - STYLE.headRadius - STYLE.labelMargin - 20;
+        var textHeight = 24;
+        if (labelY < textHeight) labelY = textHeight;
 
+        ctx.save();
+        ctx.translate(faceX, labelY);
+        ctx.scale(-1, 1);
+        ctx.translate(-faceX, -labelY);
         ctx.fillText('P' + (p + 1), faceX, labelY);
+        ctx.restore();
       }
     }
 
