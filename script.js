@@ -11,14 +11,32 @@ const COOLDOWN_MS = 2500;
 const MIN_KEYPOINT_SCORE = 0.25;
 const MOTION_THRESHOLD = 15;
 
-// デザイン設定
+// デザイン・発光の設定（ここをいじると調整できます）
 const STYLE = {
   leftColor: '#00FFFF',   // 左半身の色 (シアン)
   rightColor: '#FF00FF',  // 右半身の色 (マゼンタ)
   bodyColor: '#FFFFFF',   // 体幹の色 (白)
   lineWidth: 8,           // 線の太さ
   jointRadius: 6,         // 関節の丸の大きさ
-  headRadius: 25          // 頭の大きさ
+  headRadius: 20,         // 頭の大きさ
+  
+  // ラベル（P1, P2...）の設定
+  labelColor: '#FFFFFF',  // 文字色
+  labelFont: 'bold 24px Arial', // フォント
+  labelOffset: 40         // 頭の中心からどれくらい上に表示するか
+};
+
+const GLOW_SETTINGS = {
+  // 動いている時の光り方
+  moving: {
+    blur: 30,                       // ぼかしの強さ（大きいほど強く光る）
+    color: 'rgba(255, 255, 255, 1.0)' // 光の色
+  },
+  // 止まっている時の光り方
+  static: {
+    blur: 10,                        // ぼかしの強さ
+    color: 'rgba(255, 255, 255, 0.3)' // 光の色
+  }
 };
 
 const COCO_KEYPOINT_NAMES = [
@@ -345,10 +363,8 @@ function drawOverlay(assignedPoses) {
     ctx.clearRect(0, 0, w, h);
     
     if (!assignedPoses) return;
-    if (w === 0 || h === 0) return;
 
-    // ネオン発光エフェクトの設定
-    ctx.shadowBlur = 10;
+    // 線端のスタイル
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
 
@@ -358,41 +374,35 @@ function drawOverlay(assignedPoses) {
       
       var kp = pose.keypoints;
       
-      // キーポイントを名前で引けるようにマップ化 & 座標変換 (左右反転対応)
+      // キーポイント座標の変換（鏡写し対応）
       var km = {};
       var validCount = 0;
-      var minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
       for (var i = 0; i < kp.length; i++) {
         var k = kp[i];
         if (k && k.score && k.score >= MIN_KEYPOINT_SCORE) {
-          km[k.name] = { x: w - k.x, y: k.y }; // ここで鏡写し変換
+          km[k.name] = { x: w - k.x, y: k.y }; 
           validCount++;
-          minX = Math.min(minX, w - k.x);
-          maxX = Math.max(maxX, w - k.x);
-          minY = Math.min(minY, k.y);
-          maxY = Math.max(maxY, k.y);
         }
       }
       
-      // 認識している点が少なすぎる場合は描画しない
       if (validCount < 5) continue;
 
-      // 前回のフレームとの差分で動いているか判定（既存ロジック）
+      // 動き判定
       var prevPose = previousPosePositions[p];
       var motion = calculateMotion(prevPose, pose);
       window.motionDetectionCount++;
       var isMoving = motion > MOTION_THRESHOLD;
       
-      // 動いている時は発光を強く、色は判定結果や状態で変えても良いが、
-      // 基本は「プレイヤーが見やすい色」優先にする
-      ctx.shadowColor = isMoving ? 'rgba(255, 255, 255, 0.8)' : 'rgba(255, 255, 255, 0.2)';
+      // ★発光エフェクトの適用
+      if (isMoving) {
+        ctx.shadowBlur = GLOW_SETTINGS.moving.blur;
+        ctx.shadowColor = GLOW_SETTINGS.moving.color;
+      } else {
+        ctx.shadowBlur = GLOW_SETTINGS.static.blur;
+        ctx.shadowColor = GLOW_SETTINGS.static.color;
+      }
 
-      // 動き検出に応じて色を調整（動いている時は全体を少し赤みがかる）
-      var leftColor = isMoving ? '#FF66FF' : STYLE.leftColor;
-      var rightColor = isMoving ? '#FF66FF' : STYLE.rightColor;
-      var bodyColor = isMoving ? '#FFCCCC' : STYLE.bodyColor;
-
-      // --- 描画関数定義 ---
+      // --- 描画関数 ---
       function drawLimb(name1, name2, color) {
         if (km[name1] && km[name2]) {
           ctx.beginPath();
@@ -408,45 +418,42 @@ function drawOverlay(assignedPoses) {
         if (km[name]) {
           ctx.beginPath();
           ctx.arc(km[name].x, km[name].y, STYLE.jointRadius, 0, Math.PI * 2);
-          ctx.fillStyle = '#FFF'; // 関節の中心は白で光らせる
+          ctx.fillStyle = '#FFF';
           ctx.fill();
-          ctx.lineWidth = 2;
+          // 関節の縁取りにも発光色を適用するため stroke する
           ctx.strokeStyle = color;
+          ctx.lineWidth = 2;
           ctx.stroke();
         }
       }
 
-      // --- 1. ボーン（線）の描画 ---
-      
+      // --- 1. ボーン（線） ---
       // 体幹
-      drawLimb('left_shoulder', 'right_shoulder', bodyColor);
-      drawLimb('left_hip', 'right_hip', bodyColor);
-      drawLimb('left_shoulder', 'left_hip', leftColor);   // 左脇腹
-      drawLimb('right_shoulder', 'right_hip', rightColor); // 右脇腹
+      drawLimb('left_shoulder', 'right_shoulder', STYLE.bodyColor);
+      drawLimb('left_hip', 'right_hip', STYLE.bodyColor);
+      drawLimb('left_shoulder', 'left_hip', STYLE.leftColor);
+      drawLimb('right_shoulder', 'right_hip', STYLE.rightColor);
 
-      // 左腕・左足 (Left -> Cyan)
-      drawLimb('left_shoulder', 'left_elbow', leftColor);
-      drawLimb('left_elbow', 'left_wrist', leftColor);
-      drawLimb('left_hip', 'left_knee', leftColor);
-      drawLimb('left_knee', 'left_ankle', leftColor);
+      // 左側 (Cyan)
+      drawLimb('left_shoulder', 'left_elbow', STYLE.leftColor);
+      drawLimb('left_elbow', 'left_wrist', STYLE.leftColor);
+      drawLimb('left_hip', 'left_knee', STYLE.leftColor);
+      drawLimb('left_knee', 'left_ankle', STYLE.leftColor);
 
-      // 右腕・右足 (Right -> Magenta)
-      drawLimb('right_shoulder', 'right_elbow', rightColor);
-      drawLimb('right_elbow', 'right_wrist', rightColor);
-      drawLimb('right_hip', 'right_knee', rightColor);
-      drawLimb('right_knee', 'right_ankle', rightColor);
+      // 右側 (Magenta)
+      drawLimb('right_shoulder', 'right_elbow', STYLE.rightColor);
+      drawLimb('right_elbow', 'right_wrist', STYLE.rightColor);
+      drawLimb('right_hip', 'right_knee', STYLE.rightColor);
+      drawLimb('right_knee', 'right_ankle', STYLE.rightColor);
 
-
-      // --- 2. ジョイント（関節）の描画 ---
+      // --- 2. ジョイント（関節） ---
       ['left_shoulder', 'left_elbow', 'left_wrist', 'left_hip', 'left_knee', 'left_ankle']
-        .forEach(function(name) { drawJoint(name, leftColor); });
+        .forEach(function(n) { drawJoint(n, STYLE.leftColor); });
       
       ['right_shoulder', 'right_elbow', 'right_wrist', 'right_hip', 'right_knee', 'right_ankle']
-        .forEach(function(name) { drawJoint(name, rightColor); });
+        .forEach(function(n) { drawJoint(n, STYLE.rightColor); });
 
-
-      // --- 3. 頭（顔）の描画 ---
-      // 鼻、目、耳の平均座標を計算して「顔の中心」とする
+      // --- 3. 頭（顔）とプレイヤーラベル ---
       var faceParts = ['nose', 'left_eye', 'right_eye', 'left_ear', 'right_ear'];
       var fx = 0, fy = 0, fCount = 0;
       for (var f = 0; f < faceParts.length; f++) {
@@ -458,68 +465,47 @@ function drawOverlay(assignedPoses) {
         }
       }
 
+      // 顔が見つからない場合は「両肩の中点の上」を仮の頭とする
+      if (fCount === 0 && km['left_shoulder'] && km['right_shoulder']) {
+        fx = (km['left_shoulder'].x + km['right_shoulder'].x) / 2;
+        fy = (km['left_shoulder'].y + km['right_shoulder'].y) / 2 - 40;
+        fCount = 1;
+      }
+
       if (fCount > 0) {
         var faceX = fx / fCount;
         var faceY = fy / fCount;
 
-        // 顔の円を描く
-        ctx.save();
-        ctx.shadowColor = bodyColor;
-        ctx.shadowBlur = 8;
+        // 顔アイコン
         ctx.beginPath();
         ctx.arc(faceX, faceY, STYLE.headRadius, 0, Math.PI * 2);
         ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
         ctx.fill();
-        ctx.strokeStyle = bodyColor;
+        ctx.strokeStyle = STYLE.bodyColor;
         ctx.lineWidth = 3;
         ctx.stroke();
-        ctx.restore();
 
-        // 顔の中にプレイヤー番号を表示
-        ctx.save();
-        ctx.fillStyle = '#333';
-        ctx.font = 'bold 20px Arial';
+        // ★プレイヤーラベル (頭の上に表示)
+        // 文字には発光をかけないため、一時的にshadowBlurをリセット
+        ctx.shadowBlur = 0;
+        
+        ctx.fillStyle = STYLE.labelColor;
+        ctx.font = STYLE.labelFont;
         ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.shadowColor = 'rgba(255, 255, 255, 0.8)';
-        ctx.shadowBlur = 2;
-        ctx.fillText('P' + (p + 1), faceX, faceY);
-        ctx.restore();
+        ctx.textBaseline = 'bottom'; // 下揃えにすることで座標の上に文字が乗る
+        // 頭の中心から STYLE.labelOffset 分だけ上に表示
+        ctx.fillText('P' + (p + 1), faceX, faceY - STYLE.labelOffset);
+        
+        // 発光設定を戻す（次の人の描画のため）
+        if (isMoving) {
+            ctx.shadowBlur = GLOW_SETTINGS.moving.blur;
+        } else {
+            ctx.shadowBlur = GLOW_SETTINGS.static.blur;
+        }
       }
-      
-      // 枠を描画（動き検出の視覚的フィードバック用）
-      var padding = 20;
-      var boxX = minX - padding;
-      var boxY = minY - padding;
-      var boxW = maxX - minX + padding * 2;
-      var boxH = maxY - minY + padding * 2;
-      if (boxX < 0) { boxW += boxX; boxX = 0; }
-      if (boxY < 0) { boxH += boxY; boxY = 0; }
-      if (boxX + boxW > w) boxW = w - boxX;
-      if (boxY + boxH > h) boxH = h - boxY;
-      
-      ctx.save();
-      ctx.strokeStyle = isMoving ? '#f44336' : '#4CAF50';
-      ctx.lineWidth = 3;
-      ctx.shadowColor = isMoving ? 'rgba(244, 67, 54, 0.5)' : 'rgba(76, 175, 80, 0.5)';
-      ctx.shadowBlur = 8;
-      var cornerRadius = 8;
-      ctx.beginPath();
-      ctx.moveTo(boxX + cornerRadius, boxY);
-      ctx.lineTo(boxX + boxW - cornerRadius, boxY);
-      ctx.quadraticCurveTo(boxX + boxW, boxY, boxX + boxW, boxY + cornerRadius);
-      ctx.lineTo(boxX + boxW, boxY + boxH - cornerRadius);
-      ctx.quadraticCurveTo(boxX + boxW, boxY + boxH, boxX + boxW - cornerRadius, boxY + boxH);
-      ctx.lineTo(boxX + cornerRadius, boxY + boxH);
-      ctx.quadraticCurveTo(boxX, boxY + boxH, boxX, boxY + boxH - cornerRadius);
-      ctx.lineTo(boxX, boxY + cornerRadius);
-      ctx.quadraticCurveTo(boxX, boxY, boxX + cornerRadius, boxY);
-      ctx.closePath();
-      ctx.stroke();
-      ctx.restore();
     }
     
-    // 設定を戻す
+    // 最後に設定をリセット
     ctx.shadowBlur = 0;
 
   } catch (err) {
