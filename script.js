@@ -1,832 +1,559 @@
 /**
- * ポーズ合わせゲーム
- * - 最大4人検出（MoveNet MultiPose / PoseNet multi-pose）
- * - お題ポーズと一致でOK、不一致でX
- * - 難易度3段階、プレイヤー別トータル点数、BGM
+ * ポーズ合わせゲーム (MoveNet MultiPose Lightning版)
+ * * 改良点:
+ * 1. MoveNet使用による認識精度と速度の向上
+ * 2. 距離ベースのトラッキング（人が動いてもIDが入れ替わりにくい）
+ * 3. 部位ごとの強力なスムージング処理
+ * 4. 判定時の視覚エフェクト強化
  */
 
 const BGM_PATH = 'music/bgm.mp3';
-// 難易度ごとの判定閾値（腕の状態が両方一致したときのみ合格）
-const DIFFICULTY_THRESHOLD = { easy: 0.75, normal: 0.85, hard: 0.95 };
-const COOLDOWN_MS = 2500;
-const MIN_KEYPOINT_SCORE = 0.25;
-const MOTION_THRESHOLD = 15;
 
-// ★スムージング設定（0.0〜1.0: 小さいほど滑らかだが遅延する）
-// ガクガク・飛びを抑えるため強めに設定（前のフレームを多く残す）
-const SMOOTH_ALPHA = {
-  torso: 0.5,        // 体幹
-  limbs: 0.4,       // 肘・膝
-  extremities: 0.3   // 手首・足首
+// 難易度ごとの判定しきい値（ポイントが入りやすいように調整）
+const DIFFICULTY_THRESHOLD = { easy: 0.60, normal: 0.72, hard: 0.85 };
+
+const CONFIG = {
+    maxPlayers: 4,
+    minScore: 0.3,       // これ以下の信頼度の関節は無視
+    holdFrames: 5,       // OK判定を維持するフレーム数（5フレームで得点）
+    cooldown: 2000,      // 得点後のクールダウン(ms)
+    smoothAlpha: 0.5,    // 補間係数 (小さいほど滑らかだが遅れる)
+    matchDist: 0.88      // スムージング用の重み
 };
-// ★飛び防止: 1フレームでこれ以上動いたら制限をかける（ピクセル）
-// 人間が素早く手を振ると1フレームで100px以上動くことがあるため緩和
-const MAX_JUMP_PIXELS = 300;
 
-// ★手のスムージング強化（手首は他より強く安定化して飛びを抑える）
-// lerp では alpha = 新座標の反映率。小さいほど強くスムージング
-const SMOOTH_ALPHA_HANDS = 0.2;
+// スケルトンのデザイン
+const STYLE = {
+    lineColor: '#ffffff',
+    lineWidth: 6,
+    jointColor: '#2196F3',
+    jointRadius: 6,
+    matchColor: '#00FF00', // マッチした時の色
+    font: 'bold 24px Arial'
+};
 
-// 割り当ての安定化：前フレームとの距離が近いほど同一人物として扱うボーナス
-var STICKY_DISTANCE_BONUS = 350;
-
-const SKELETON_EDGES = [
-  ['left_shoulder', 'right_shoulder'],
-  ['left_shoulder', 'left_elbow'],
-  ['left_elbow', 'left_wrist'],
-  ['right_shoulder', 'right_elbow'],
-  ['right_elbow', 'right_wrist'],
-  ['left_shoulder', 'left_hip'],
-  ['right_shoulder', 'right_hip'],
-  ['left_hip', 'right_hip'],
-  ['left_hip', 'left_knee'],
-  ['left_knee', 'left_ankle'],
-  ['right_hip', 'right_knee'],
-  ['right_knee', 'right_ankle']
+// 関節の接続定義
+const EDGES = [
+    ['nose','left_eye'], ['nose','right_eye'], ['left_eye','left_ear'], ['right_eye','right_ear'],
+    ['left_shoulder','right_shoulder'], ['left_shoulder','left_elbow'], ['left_elbow','left_wrist'],
+    ['right_shoulder','right_elbow'], ['right_elbow','right_wrist'], ['left_shoulder','left_hip'],
+    ['right_shoulder','right_hip'], ['left_hip','right_hip'], ['left_hip','left_knee'],
+    ['left_knee','left_ankle'], ['right_hip','right_knee'], ['right_knee','right_ankle']
 ];
 
+// グローバル変数
 let detector = null;
-let usePoseNet = false;
-let currentDifficulty = 'normal';
-let maxPlayerCount = 4;
-let currentTargetIndex = 0;
-let playerScores = [0, 0, 0, 0];
-let playerCooldownUntil = [0, 0, 0, 0];
-let lastPlayerPoses = [null, null, null, null];
-let lastJudgeResult = [null, null, null, null];
-let gameStarted = false;
-let previousPosePositions = [null, null, null, null];
+let video = document.getElementById('webcam');
+let overlay = document.getElementById('overlayCanvas');
+let ctx = overlay.getContext('2d');
+let targetCanvas = document.getElementById('targetCanvas');
+let statusEl = document.getElementById('status');
+let bgm = document.getElementById('bgm');
+let loadingEl = document.getElementById('loading');
 
-// ★スムージング用：前回の確定座標を保持
-let smoothedPoses = [null, null, null, null];
+let state = {
+    players: [],
+    targetIndex: 0,
+    difficulty: 'normal',
+    maxPlayers: 4,
+    isRunning: false,
+    autoSwitch: false,
+    autoSwitchInterval: 10000,
+    autoSwitchTimerId: null
+};
 
-const video = document.getElementById('webcam');
-const statusEl = document.getElementById('status');
-const targetCanvas = document.getElementById('targetCanvas');
-const targetNameEl = document.getElementById('targetName');
-const overlayCanvas = document.getElementById('overlayCanvas');
-const bgmEl = document.getElementById('bgm');
-
-// --- スムージング関数 ---
-function lerp(start, end, amt) {
-  return (1 - amt) * start + amt * end;
+// 初期化（プレイヤースロット作成）
+for (let i = 0; i < 4; i++) {
+    state.players.push({
+        id: i,
+        keypoints: null,
+        smoothed: null,
+        matchCount: 0,
+        score: 0,
+        cooldownUntil: 0,
+        assigned: false
+    });
 }
 
-function smoothPoses(rawPoses, players) {
-  // rawPoses: 今回検出されたポーズリスト
-  // players: 割り当て済みのポーズ（未加工）
-  // ここで players[p] の座標を smoothedPoses[p] とブレンドして書き換える
+// ----------------------------------------------------------------------
+// ターゲットポーズ定義
+// ----------------------------------------------------------------------
+function getTargetPoses() {
+    const standing = {
+        left_shoulder: { x: -0.5, y: -0.35 }, right_shoulder: { x: 0.5, y: -0.35 },
+        left_elbow: { x: -0.6, y: -0.1 }, right_elbow: { x: 0.6, y: -0.1 },
+        left_wrist: { x: -0.55, y: 0.15 }, right_wrist: { x: 0.55, y: 0.15 },
+        left_hip: { x: -0.4, y: 0.25 }, right_hip: { x: 0.4, y: 0.25 }
+    };
+    return [
+        { name: '右手を上げる', keypoints: { ...standing, right_elbow: { x: 0.5, y: -0.5 }, right_wrist: { x: 0.45, y: -0.75 } } },
+        { name: '左手を上げる', keypoints: { ...standing, left_elbow: { x: -0.5, y: -0.5 }, left_wrist: { x: -0.45, y: -0.75 } } },
+        { name: '両手を上げる', keypoints: { ...standing, left_elbow: { x: -0.5, y: -0.55 }, right_elbow: { x: 0.5, y: -0.55 }, left_wrist: { x: -0.5, y: -0.8 }, right_wrist: { x: 0.5, y: -0.8 } } },
+        { name: 'Yのポーズ', keypoints: { ...standing, left_elbow: { x: -0.6, y: -0.5 }, right_elbow: { x: 0.6, y: -0.5 }, left_wrist: { x: -0.7, y: -0.8 }, right_wrist: { x: 0.7, y: -0.8 } } },
+        { name: 'コマネチ', keypoints: { ...standing, left_wrist: { x: 0.1, y: 0.4 }, right_wrist: { x: -0.1, y: 0.4 }, left_elbow: { x: -0.6, y: 0.0 }, right_elbow: { x: 0.6, y: 0.0 } } },
+        { name: '気をつけ', keypoints: standing }
+    ];
+}
+const TARGET_POSES = getTargetPoses();
 
-  for (let p = 0; p < 4; p++) {
-    const raw = players[p];
-    const prev = smoothedPoses[p];
+// ----------------------------------------------------------------------
+// メイン処理
+// ----------------------------------------------------------------------
+async function init() {
+    try {
+        loadingEl.style.display = 'block';
+        statusEl.textContent = 'TensorFlow.jsを初期化しています...';
 
-    if (!raw) {
-      // 検出されなかったら履歴もリセット（あるいは維持する手もあるが、今回はリセット）
-      smoothedPoses[p] = null;
-      continue;
-    }
-
-    // 初回検出時はそのまま採用
-    if (!prev) {
-      smoothedPoses[p] = JSON.parse(JSON.stringify(raw));
-      continue;
-    }
-
-    // 各キーポイントについて補間を行う
-    raw.keypoints.forEach((kp, idx) => {
-      const prevKp = prev.keypoints[idx]; // 同じインデックス前提
-
-      // キーポイントが見つからない、またはスコアが低すぎる場合は更新しない（前回の位置を維持）
-      if (!kp || kp.score < MIN_KEYPOINT_SCORE) {
-        if (prevKp) {
-          kp.x = prevKp.x;
-          kp.y = prevKp.y;
-          kp.score = prevKp.score; // スコアも維持
+        // TensorFlow.jsのバックエンドを初期化（WebGPUはWindowsで問題があるためWebGLを優先）
+        if (typeof tf !== 'undefined') {
+            try {
+                await tf.setBackend('webgl');
+            } catch (be) {
+                console.warn('WebGL backend failed, using default:', be.message);
+            }
+            await tf.ready();
         }
-        return;
-      }
 
-      // 前回のデータがない場合はそのまま
-      if (!prevKp) return;
+        statusEl.textContent = 'MoveNetモデルを読み込んでいます...';
 
-      // 部位ごとのAlpha値を決定
-      let alpha = SMOOTH_ALPHA.torso;
-      if (kp.name.includes('wrist')) {
-        alpha = SMOOTH_ALPHA_HANDS; // 手首は強めのスムージングで飛びを抑える
-      } else if (kp.name.includes('ankle') || kp.name.includes('eye') || kp.name.includes('ear') || kp.name.includes('nose')) {
-        alpha = SMOOTH_ALPHA.extremities;
-      } else if (kp.name.includes('knee') || kp.name.includes('elbow')) {
-        alpha = SMOOTH_ALPHA.limbs;
-      }
+        // MoveNet MultiPose Lightning (高速・複数人対応)
+        try {
+            var model = poseDetection.SupportedModels.MoveNet;
+            var modelType = (typeof poseDetection.movenet !== 'undefined' && poseDetection.movenet.modelType)
+                ? poseDetection.movenet.modelType.MULTIPOSE_LIGHTNING
+                : 'MultiPose.Lightning';
+            var detectorConfig = {
+                modelType: modelType,
+                enableSmoothing: true,
+                enableTracking: true,
+                minPoseScore: 0.25
+            };
+            detector = await poseDetection.createDetector(model, detectorConfig);
+        } catch (modelErr) {
+            console.warn('MoveNet load failed, falling back to PoseNet:', modelErr.message);
+            var model = poseDetection.SupportedModels.PoseNet;
+            detector = await poseDetection.createDetector(model, {
+                architecture: 'MobileNetV1',
+                outputStride: 16,
+                inputResolution: { width: 500, height: 500 },
+                multiplier: 0.75
+            });
+        }
 
-      // ★飛び防止: 移動距離が大きすぎる場合は制限する
-      let dx = kp.x - prevKp.x;
-      let dy = kp.y - prevKp.y;
-      const dist = Math.sqrt(dx * dx + dy * dy);
+        // カメラセットアップ
+        const stream = await navigator.mediaDevices.getUserMedia({
+            video: { width: 640, height: 480, facingMode: 'user' }
+        });
+        video.srcObject = stream;
 
-      if (dist > MAX_JUMP_PIXELS) {
-        // 移動制限: 指定ピクセル以上動こうとしたら、その方向へ MAX_JUMP_PIXELS 分だけ動かす
-        const ratio = MAX_JUMP_PIXELS / dist;
-        kp.x = prevKp.x + dx * ratio;
-        kp.y = prevKp.y + dy * ratio;
-        // 急激に飛んだときはスムージングをさらに強くしてバタつきを抑える
-        alpha *= 0.5;
-      }
+        await new Promise(function (resolve) { video.onloadedmetadata = resolve; });
+        video.play();
 
-      // 線形補間 (Low Pass Filter)
-      kp.x = lerp(prevKp.x, kp.x, alpha);
-      kp.y = lerp(prevKp.y, kp.y, alpha);
+        // キャンバスサイズ合わせ
+        video.width = video.videoWidth;
+        video.height = video.videoHeight;
+        overlay.width = video.videoWidth;
+        overlay.height = video.videoHeight;
+
+        loadingEl.style.display = 'none';
+        statusEl.textContent = '準備完了！';
+
+        state.isRunning = true;
+        drawTargetPose();
+        detectLoop();
+
+        initUI();
+
+        if (bgm) {
+            fetch(BGM_PATH, { method: 'HEAD' }).then(function (res) {
+                if (res.ok) {
+                    bgm.src = BGM_PATH;
+                    bgm.play().catch(function () {});
+                }
+            }).catch(function () {});
+        }
+
+    } catch (e) {
+        loadingEl.style.display = 'none';
+        statusEl.textContent = 'エラー: ' + e.message;
+        console.error(e);
+    }
+}
+
+// 検出ループ
+async function detectLoop() {
+    if (!state.isRunning) return;
+
+    // 1. 推論実行
+    var poses = [];
+    if (detector && video.readyState >= 2) {
+        try {
+            poses = await detector.estimatePoses(video, {
+                maxPoses: state.maxPlayers,
+                flipHorizontal: true
+            });
+        } catch (e) {
+            console.warn(e);
+        }
+    }
+
+    // 2. プレイヤー割り当て (重要: IDを維持する処理)
+    assignPosesToPlayers(poses);
+
+    // 3. 判定と描画
+    ctx.clearRect(0, 0, overlay.width, overlay.height);
+
+    ctx.fillStyle = 'rgba(0,0,0,0.1)';
+    ctx.fillRect(0, 0, overlay.width, overlay.height);
+
+    var now = Date.now();
+    var target = TARGET_POSES[state.targetIndex];
+    var threshold = DIFFICULTY_THRESHOLD[state.difficulty];
+
+    for (var i = 0; i < state.maxPlayers; i++) {
+        var p = state.players[i];
+
+        if (!p.assigned || !p.smoothed) {
+            p.matchCount = 0;
+            continue;
+        }
+
+        var isMatch = false;
+        var sim = 0;
+
+        if (target) {
+            var normUser = normalizePose(keypointsToMap(p.smoothed));
+            sim = poseSimilarity(normUser, target.keypoints);
+            isMatch = sim >= threshold;
+        }
+
+        if (isMatch) {
+            p.matchCount++;
+            if (p.matchCount >= CONFIG.holdFrames && now > p.cooldownUntil) {
+                p.score++;
+                p.cooldownUntil = now + CONFIG.cooldown;
+                p.matchCount = 0;
+                updateScoreUI(i);
+            }
+        } else {
+            p.matchCount = Math.max(0, p.matchCount - 2);
+        }
+
+        var isCoolingDown = now < p.cooldownUntil;
+        var baseColor = isMatch ? STYLE.matchColor : (isCoolingDown ? '#FFD700' : STYLE.jointColor);
+
+        drawSkeleton(p.smoothed, baseColor, 'P' + (i + 1));
+    }
+
+    requestAnimationFrame(detectLoop);
+}
+
+// ----------------------------------------------------------------------
+// プレイヤー割り当てロジック (トラッキングの肝)
+// ----------------------------------------------------------------------
+function assignPosesToPlayers(newPoses) {
+    state.players.forEach(function (p) { p.assigned = false; });
+
+    if (newPoses.length === 0) return;
+
+    var sortedPoses = newPoses.map(function (pose) {
+        return {
+            pose: pose,
+            center: getCenter(pose.keypoints),
+            assignedTo: -1
+        };
+    });
+    sortedPoses.sort(function (a, b) { return a.center.x - b.center.x; });
+
+    var width = overlay.width;
+    var MAX_DIST = width * 0.3;
+
+    // 1. ID維持フェーズ
+    state.players.forEach(function (player) {
+        if (!player.smoothed) return;
+
+        var prevCenter = getCenter(player.smoothed);
+        var bestIdx = -1;
+        var minDist = Infinity;
+
+        for (var i = 0; i < sortedPoses.length; i++) {
+            if (sortedPoses[i].assignedTo !== -1) continue;
+            var dist = Math.hypot(sortedPoses[i].center.x - prevCenter.x, sortedPoses[i].center.y - prevCenter.y);
+
+            if (dist < minDist && dist < MAX_DIST) {
+                minDist = dist;
+                bestIdx = i;
+            }
+        }
+
+        if (bestIdx !== -1) {
+            updatePlayerPose(player, sortedPoses[bestIdx].pose.keypoints);
+            sortedPoses[bestIdx].assignedTo = player.id;
+        }
     });
 
-    // 結果を保存
-    smoothedPoses[p] = JSON.parse(JSON.stringify(raw));
+    // 2. 新規割り当てフェーズ
+    for (var i = 0; i < sortedPoses.length; i++) {
+        if (sortedPoses[i].assignedTo !== -1) continue;
 
-    // 割り当て配列の中身も書き換える（これで描画や判定に使われる）
-    players[p] = raw;
-  }
-}
-// ----------------------
-
-function getTargetPoses() {
-  var standing = {
-    left_shoulder: { x: -0.5, y: -0.35 },
-    right_shoulder: { x: 0.5, y: -0.35 },
-    left_elbow: { x: -0.6, y: -0.1 },
-    right_elbow: { x: 0.6, y: -0.1 },
-    left_wrist: { x: -0.55, y: 0.15 },
-    right_wrist: { x: 0.55, y: 0.15 },
-    left_hip: { x: -0.4, y: 0.25 },
-    right_hip: { x: 0.4, y: 0.25 },
-    left_knee: { x: -0.45, y: 0.6 },
-    right_knee: { x: 0.45, y: 0.6 },
-    left_ankle: { x: -0.45, y: 0.9 },
-    right_ankle: { x: 0.45, y: 0.9 }
-  };
-  return [
-    { id: 'right_hand_up', name: '右手を上げる', keypoints: { ...standing, right_elbow: { x: 0.5, y: -0.5 }, right_wrist: { x: 0.45, y: -0.75 } } },
-    { id: 'left_hand_up', name: '左手を上げる', keypoints: { ...standing, left_elbow: { x: -0.5, y: -0.5 }, left_wrist: { x: -0.45, y: -0.75 } } },
-    { id: 'both_hands_up', name: '両手を上げる', keypoints: { ...standing, left_elbow: { x: -0.5, y: -0.55 }, right_elbow: { x: 0.5, y: -0.55 }, left_wrist: { x: -0.5, y: -0.8 }, right_wrist: { x: 0.5, y: -0.8 } } },
-    { id: 'y_pose', name: 'Yのポーズ', keypoints: { ...standing, left_elbow: { x: -0.55, y: -0.5 }, right_elbow: { x: 0.55, y: -0.5 }, left_wrist: { x: -0.7, y: -0.8 }, right_wrist: { x: 0.7, y: -0.8 } } },
-    { id: 'hands_hips', name: '腰に手を当てる', keypoints: { ...standing, left_wrist: { x: -0.4, y: 0.2 }, right_wrist: { x: 0.4, y: 0.2 } } },
-    { id: 'flamingo', name: '片足立ち', keypoints: { ...standing, right_knee: { x: 0.7, y: 0.4 }, right_ankle: { x: 0.7, y: 0.6 } } }, // 足のポーズ例
-    { id: 'stand_neutral', name: '気をつけ', keypoints: standing }
-  ];
+        var targetSlot = state.players.find(function (p) { return !p.assigned; });
+        if (targetSlot) {
+            updatePlayerPose(targetSlot, sortedPoses[i].pose.keypoints);
+        }
+    }
 }
 
-var TARGET_POSES = getTargetPoses();
+function updatePlayerPose(player, rawKeypoints) {
+    player.assigned = true;
+    player.keypoints = rawKeypoints;
 
-function keypointsToMap(keypoints) {
-  var m = {};
-  if (!keypoints) return m;
-  for (var i = 0; i < keypoints.length; i++) {
-    var k = keypoints[i];
-    if (k && k.name) m[k.name] = { x: k.x, y: k.y, score: k.score != null ? k.score : 1 };
-  }
-  return m;
+    if (!player.smoothed) {
+        player.smoothed = rawKeypoints.map(function (kp) {
+            return { x: kp.x, y: kp.y, score: kp.score, name: kp.name };
+        });
+    } else {
+        player.smoothed = rawKeypoints.map(function (kp, idx) {
+            var prev = player.smoothed[idx];
+            var alpha = (kp.score > 0.6) ? CONFIG.smoothAlpha : 0.9;
+            return {
+                x: prev.x * alpha + kp.x * (1 - alpha),
+                y: prev.y * alpha + kp.y * (1 - alpha),
+                score: kp.score,
+                name: kp.name
+            };
+        });
+    }
 }
 
-function normalizePose(keypointMap) {
-  var leftS = keypointMap.left_shoulder;
-  var rightS = keypointMap.right_shoulder;
-  // 肩が見えていないと正規化できない
-  if (!leftS || !rightS || leftS.score < MIN_KEYPOINT_SCORE || rightS.score < MIN_KEYPOINT_SCORE) return null;
+function getCenter(keypoints) {
+    var ls = keypoints.find(function (k) { return k.name === 'left_shoulder'; });
+    var rs = keypoints.find(function (k) { return k.name === 'right_shoulder'; });
+    if (ls && rs && ls.score > 0.2 && rs.score > 0.2) {
+        return { x: (ls.x + rs.x) / 2, y: (ls.y + rs.y) / 2 };
+    }
+    var lh = keypoints.find(function (k) { return k.name === 'left_hip'; });
+    var rh = keypoints.find(function (k) { return k.name === 'right_hip'; });
+    if (lh && rh) {
+        return { x: (lh.x + rh.x) / 2, y: (lh.y + rh.y) / 2 };
+    }
+    var sx = 0, sy = 0, c = 0;
+    keypoints.forEach(function (k) {
+        if (k.score > 0.3) { sx += k.x; sy += k.y; c++; }
+    });
+    return c > 0 ? { x: sx / c, y: sy / c } : { x: 0, y: 0 };
+}
 
-  var cx = (leftS.x + rightS.x) / 2;
-  var cy = (leftS.y + rightS.y) / 2;
-  // 肩幅を基準にスケール
-  var scale = Math.sqrt(Math.pow(rightS.x - leftS.x, 2) + Math.pow(rightS.y - leftS.y, 2)) || 1;
+// ----------------------------------------------------------------------
+// 描画関連
+// ----------------------------------------------------------------------
+function drawSkeleton(keypoints, color, label) {
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
 
-  var out = {};
-  for (var name in keypointMap) {
-    var k = keypointMap[name];
-    if (k.score != null && k.score < MIN_KEYPOINT_SCORE) continue;
-    out[name] = { x: (k.x - cx) / scale, y: (k.y - cy) / scale };
-  }
-  return out;
+    var kpMap = {};
+    keypoints.forEach(function (k) { kpMap[k.name] = k; });
+
+    ctx.beginPath();
+    ctx.strokeStyle = color;
+    ctx.lineWidth = STYLE.lineWidth;
+
+    EDGES.forEach(function (edge) {
+        var a = kpMap[edge[0]];
+        var b = kpMap[edge[1]];
+        if (a && b && a.score > CONFIG.minScore && b.score > CONFIG.minScore) {
+            ctx.moveTo(a.x, a.y);
+            ctx.lineTo(b.x, b.y);
+        }
+    });
+    ctx.stroke();
+
+    keypoints.forEach(function (k) {
+        if (k.score > CONFIG.minScore) {
+            ctx.beginPath();
+            ctx.arc(k.x, k.y, STYLE.jointRadius, 0, 2 * Math.PI);
+            ctx.fillStyle = color;
+            ctx.fill();
+            ctx.strokeStyle = '#fff';
+            ctx.lineWidth = 1;
+            ctx.stroke();
+        }
+    });
+
+    var nose = kpMap['nose'];
+    var ear = kpMap['left_ear'] || kpMap['right_ear'];
+    var target = nose || ear || keypoints[0];
+
+    if (target && target.score > CONFIG.minScore) {
+        ctx.save();
+        ctx.translate(target.x, target.y - 40);
+        ctx.scale(-1, 1);
+        ctx.fillStyle = STYLE.lineColor;
+        ctx.font = STYLE.font;
+        ctx.textAlign = 'center';
+        ctx.fillText(label, 0, 0);
+        ctx.restore();
+    }
+}
+
+// ----------------------------------------------------------------------
+// UI & ユーティリティ
+// ----------------------------------------------------------------------
+function initUI() {
+    document.querySelectorAll('.player-count button').forEach(function (btn) {
+        btn.addEventListener('click', function (e) {
+            state.maxPlayers = parseInt(e.target.dataset.count, 10);
+            document.querySelectorAll('.player-count button').forEach(function (b) { b.classList.remove('active'); });
+            e.target.classList.add('active');
+
+            for (var i = 1; i <= 4; i++) {
+                var card = document.getElementById('card' + i);
+                if (card) card.style.display = i <= state.maxPlayers ? '' : 'none';
+            }
+            state.players.forEach(function (p) { p.smoothed = null; p.matchCount = 0; });
+        });
+    });
+
+    document.querySelectorAll('.difficulty button').forEach(function (btn) {
+        btn.addEventListener('click', function (e) {
+            state.difficulty = e.target.dataset.diff;
+            document.querySelectorAll('.difficulty button').forEach(function (b) { b.classList.remove('active'); });
+            e.target.classList.add('active');
+            if (bgm.paused) bgm.play().catch(function () {});
+        });
+    });
+
+    document.getElementById('nextPoseBtn').addEventListener('click', function () {
+        state.targetIndex = (state.targetIndex + 1) % TARGET_POSES.length;
+        drawTargetPose();
+    });
+
+    var autoSwitchBtn = document.getElementById('autoSwitchBtn');
+    if (autoSwitchBtn) {
+        autoSwitchBtn.addEventListener('click', function () {
+            state.autoSwitch = !state.autoSwitch;
+            if (state.autoSwitch) {
+                if (state.autoSwitchTimerId) clearInterval(state.autoSwitchTimerId);
+                state.autoSwitchTimerId = setInterval(function () {
+                    state.targetIndex = (state.targetIndex + 1) % TARGET_POSES.length;
+                    drawTargetPose();
+                }, state.autoSwitchInterval);
+                autoSwitchBtn.textContent = '自動切り替え ON (10秒)';
+                autoSwitchBtn.classList.add('active');
+            } else {
+                if (state.autoSwitchTimerId) {
+                    clearInterval(state.autoSwitchTimerId);
+                    state.autoSwitchTimerId = null;
+                }
+                autoSwitchBtn.textContent = '自動切り替え OFF';
+                autoSwitchBtn.classList.remove('active');
+            }
+        });
+    }
+}
+
+function updateScoreUI(idx) {
+    var el = document.getElementById('score' + (idx + 1));
+    var card = document.getElementById('card' + (idx + 1));
+    if (el) el.textContent = state.players[idx].score;
+    if (card) {
+        card.classList.add('active');
+        setTimeout(function () { card.classList.remove('active'); }, 200);
+    }
+}
+
+function keypointsToMap(kps) {
+    var m = {};
+    kps.forEach(function (k) { m[k.name] = k; });
+    return m;
+}
+
+function normalizePose(km) {
+    var ls = km.left_shoulder, rs = km.right_shoulder;
+    if (!ls || !rs || ls.score < 0.3 || rs.score < 0.3) return null;
+
+    var cx = (ls.x + rs.x) / 2;
+    var cy = (ls.y + rs.y) / 2;
+    var scale = Math.hypot(rs.x - ls.x, rs.y - ls.y) || 1;
+
+    var out = {};
+    for (var name in km) {
+        if (km[name].score < 0.3) continue;
+        out[name] = {
+            x: (km[name].x - cx) / scale,
+            y: (km[name].y - cy) / scale
+        };
+    }
+    return out;
 }
 
 function getArmState(wristY, shoulderY, hipY) {
-  var dy = wristY - shoulderY;
-  var dyHip = Math.abs(wristY - hipY);
-  if (dy < -0.12) return 'up';      // 手首が肩より0.12以上上
-  if (dyHip < 0.06) return 'hips';  // 手首が腰の近く
-  return 'down';
+    var dy = wristY - shoulderY;
+    var dyHip = Math.abs(wristY - hipY);
+    if (dy < -0.12) return 'up';
+    if (dyHip < 0.06) return 'hips';
+    return 'down';
 }
 
-function poseSimilarity(normUser, targetKeypoints) {
-  // 動かす部位（腕の状態）のみで厳密に判定。左右両方一致したときだけ合格
-  if (!normUser || !targetKeypoints) return 0;
-  var leftS = normUser.left_shoulder;
-  var rightS = normUser.right_shoulder;
-  var leftW = normUser.left_wrist;
-  var rightW = normUser.right_wrist;
-  var leftH = normUser.left_hip;
-  var rightH = normUser.right_hip;
-  if (!leftS || !rightS) return 0;
+function poseSimilarity(user, target) {
+    if (!user || !target) return 0;
+    var leftS = user.left_shoulder;
+    var rightS = user.right_shoulder;
+    var leftW = user.left_wrist;
+    var rightW = user.right_wrist;
+    var leftH = user.left_hip;
+    var rightH = user.right_hip;
+    if (!leftS || !rightS) return 0;
 
-  var shoulderY = (leftS.y + rightS.y) / 2;
-  var hipY = leftH && rightH ? (leftH.y + rightH.y) / 2 : shoulderY + 0.55;
-  var leftArmUser = leftW ? getArmState(leftW.y, shoulderY, hipY) : 'down';
-  var rightArmUser = rightW ? getArmState(rightW.y, shoulderY, hipY) : 'down';
+    var shoulderY = (leftS.y + rightS.y) / 2;
+    var hipY = (leftH && rightH) ? (leftH.y + rightH.y) / 2 : shoulderY + 0.55;
+    var leftArmUser = leftW ? getArmState(leftW.y, shoulderY, hipY) : 'down';
+    var rightArmUser = rightW ? getArmState(rightW.y, shoulderY, hipY) : 'down';
 
-  var tShoulderY = (targetKeypoints.left_shoulder.y + targetKeypoints.right_shoulder.y) / 2;
-  var tHipY = (targetKeypoints.left_hip && targetKeypoints.right_hip) ? (targetKeypoints.left_hip.y + targetKeypoints.right_hip.y) / 2 : 0.25;
-  var leftArmTarget = targetKeypoints.left_wrist ? getArmState(targetKeypoints.left_wrist.y, tShoulderY, tHipY) : 'down';
-  var rightArmTarget = targetKeypoints.right_wrist ? getArmState(targetKeypoints.right_wrist.y, tShoulderY, tHipY) : 'down';
+    var tShoulderY = (target.left_shoulder.y + target.right_shoulder.y) / 2;
+    var tHipY = (target.left_hip && target.right_hip) ? (target.left_hip.y + target.right_hip.y) / 2 : 0.25;
+    var leftArmTarget = target.left_wrist ? getArmState(target.left_wrist.y, tShoulderY, tHipY) : 'down';
+    var rightArmTarget = target.right_wrist ? getArmState(target.right_wrist.y, tShoulderY, tHipY) : 'down';
 
-  var leftMatch = leftArmUser === leftArmTarget;
-  var rightMatch = rightArmUser === rightArmTarget;
-  if (!leftMatch || !rightMatch) return 0;
-  return 1.0;
+    var leftMatch = leftArmUser === leftArmTarget;
+    var rightMatch = rightArmUser === rightArmTarget;
+    if (!leftMatch || !rightMatch) return 0;
+    return 1.0;
 }
 
 function drawTargetPose() {
-  var ctx = targetCanvas.getContext('2d');
-  var w = targetCanvas.width;
-  var h = targetCanvas.height;
-  ctx.clearRect(0, 0, w, h);
-  var pose = TARGET_POSES[currentTargetIndex];
-  if (!pose || !pose.keypoints) {
-    targetNameEl.textContent = '-';
-    return;
-  }
-  targetNameEl.textContent = pose.name;
-  var kp = pose.keypoints;
-  // 描画用のスケール計算
-  var minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-  for (var name in kp) {
-    var p = kp[name];
-    minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x);
-    minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y);
-  }
-  var rangeX = (maxX - minX) || 1;
-  var rangeY = (maxY - minY) || 1;
-  var pad = 30;
-  var scale = Math.min((w - pad * 2) / rangeX, (h - pad * 2) / rangeY);
-  var cx = (minX + maxX) / 2;
-  var cy = (minY + maxY) / 2;
+    var targetCtx = targetCanvas.getContext('2d');
+    var w = targetCanvas.width;
+    var h = targetCanvas.height;
+    targetCtx.clearRect(0, 0, w, h);
 
-  function toCanvas(x, y) {
-    return { x: w / 2 + (x - cx) * scale, y: h / 2 + (y - cy) * scale };
-  }
+    var pose = TARGET_POSES[state.targetIndex];
+    document.getElementById('targetName').textContent = pose.name;
 
-  ctx.strokeStyle = '#333';
-  ctx.lineWidth = 3;
-  ctx.lineCap = 'round';
-  ctx.lineJoin = 'round';
+    var kps = pose.keypoints;
+    targetCtx.strokeStyle = '#fff';
+    targetCtx.lineWidth = 3;
+    targetCtx.beginPath();
 
-  // ボーン描画
-  for (var i = 0; i < SKELETON_EDGES.length; i++) {
-    var a = SKELETON_EDGES[i][0];
-    var b = SKELETON_EDGES[i][1];
-    if (!kp[a] || !kp[b]) continue;
-    var p1 = toCanvas(kp[a].x, kp[a].y);
-    var p2 = toCanvas(kp[b].x, kp[b].y);
-    ctx.beginPath();
-    ctx.moveTo(p1.x, p1.y);
-    ctx.lineTo(p2.x, p2.y);
-    ctx.stroke();
-  }
-  // 関節描画
-  ctx.fillStyle = '#2196F3';
-  for (var name in kp) {
-    var p = toCanvas(kp[name].x, kp[name].y);
-    ctx.beginPath();
-    ctx.arc(p.x, p.y, 5, 0, Math.PI * 2);
-    ctx.fill();
-  }
-}
-
-function updateScoreDisplays() {
-  for (var i = 0; i < 4; i++) {
-    var el = document.getElementById('score' + (i + 1));
-    if (el) el.textContent = playerScores[i];
-  }
-}
-
-function updateScoreCardVisibility() {
-  for (var i = 0; i < 4; i++) {
-    var card = document.querySelector('.scores .score-card:nth-child(' + (i + 1) + ')');
-    if (card) card.style.display = i < maxPlayerCount ? '' : 'none';
-  }
-}
-
-function initPlayerCountButtons() {
-  [1, 2, 3, 4].forEach(function (n) {
-    var btn = document.getElementById('players' + n);
-    if (!btn) return;
-    btn.addEventListener('click', function () {
-      maxPlayerCount = n;
-      document.querySelectorAll('.player-count button').forEach(function (b) { b.classList.remove('active'); });
-      btn.classList.add('active');
-      updateScoreCardVisibility();
-      for (var i = 0; i < 4; i++) {
-        if (i >= n) smoothedPoses[i] = null;
-      }
-    });
-  });
-  var btn4 = document.getElementById('players4');
-  if (btn4) btn4.classList.add('active');
-}
-
-function assignPlayers(poses) {
-  var assigned = [null, null, null, null];
-  if (!poses || poses.length === 0) return assigned;
-
-  var canvasWidth = overlayCanvas ? overlayCanvas.width : 640;
-
-  // 生データ（カメラ座標系）のままで距離計算。反転は描画直前にのみ行う
-  var posesWithIndex = poses.map(function(pose, idx) {
-    var center = getPoseCenter(pose.keypoints);
-    return { pose: pose, index: idx, centerX: center.x, centerY: center.y };
-  });
-  posesWithIndex.sort(function(a, b) { return a.centerX - b.centerX; });
-
-  var slotOrder = [0, 1, 2, 3];
-  slotOrder.sort(function(a, b) {
-    var aHasPrev = lastPlayerPoses[a] != null;
-    var bHasPrev = lastPlayerPoses[b] != null;
-    if (aHasPrev && !bHasPrev) return -1;
-    if (!aHasPrev && bHasPrev) return 1;
-    return 0;
-  });
-
-  for (var si = 0; si < 4; si++) {
-    var p = slotOrder[si];
-    var prev = smoothedPoses[p];
-    var prevPose = null;
-    if (prev) prevPose = prev;
-
-    var bestIdx = -1;
-    var bestScore = -Infinity;
-
-    for (var i = 0; i < posesWithIndex.length; i++) {
-      if (posesWithIndex[i].assigned) continue;
-
-      var currentPose = posesWithIndex[i].pose;
-      var currentCenter = getPoseCenter(currentPose.keypoints);
-
-      var dist;
-      if (prevPose) {
-        dist = poseDistance(prevPose, currentPose);
-        // 1フレームで画面の1/3以上移動したら別人扱い（飛び跳ね防止）
-        if (dist >= canvasWidth / 3) continue;
-      } else {
-        dist = Math.abs(currentCenter.x - (p * (canvasWidth / 4)));
-      }
-
-      var score = -dist;
-      if (prevPose && dist < STICKY_DISTANCE_BONUS) {
-        score += (STICKY_DISTANCE_BONUS - dist) * 1.5;
-      }
-
-      if (score > bestScore) {
-        bestScore = score;
-        bestIdx = i;
-      }
-    }
-
-    if (bestIdx >= 0) {
-      posesWithIndex[bestIdx].assigned = true;
-      assigned[p] = posesWithIndex[bestIdx].pose;
-    }
-  }
-
-  return assigned;
-}
-
-function getPoseCenter(keypoints) {
-  // 肩の中点を中心とする（安定しているため）
-  var leftS = keypoints.find(function (k) { return k.name === 'left_shoulder'; });
-  var rightS = keypoints.find(function (k) { return k.name === 'right_shoulder'; });
-  if (leftS && rightS) return { x: (leftS.x + rightS.x) / 2, y: (leftS.y + rightS.y) / 2 };
-
-  // 肩がない場合は全体の重心
-  var sumX = 0, sumY = 0, count = 0;
-  keypoints.forEach(k => {
-      if (k.score > MIN_KEYPOINT_SCORE) { sumX += k.x; sumY += k.y; count++; }
-  });
-  if (count > 0) return { x: sumX/count, y: sumY/count };
-  return { x: 0, y: 0 };
-}
-
-function getPoseHands(keypoints) {
-  var leftW = keypoints.find(function (k) { return k.name === 'left_wrist'; });
-  var rightW = keypoints.find(function (k) { return k.name === 'right_wrist'; });
-  var center = getPoseCenter(keypoints);
-  var leftX = leftW && leftW.score >= MIN_KEYPOINT_SCORE ? leftW.x : center.x - 80;
-  var leftY = leftW && leftW.score >= MIN_KEYPOINT_SCORE ? leftW.y : center.y;
-  var rightX = rightW && rightW.score >= MIN_KEYPOINT_SCORE ? rightW.x : center.x + 80;
-  var rightY = rightW && rightW.score >= MIN_KEYPOINT_SCORE ? rightW.y : center.y;
-  return { left: { x: leftX, y: leftY }, right: { x: rightX, y: rightY } };
-}
-
-function poseDistance(poseA, poseB) {
-  var centerA = getPoseCenter(poseA.keypoints);
-  var centerB = getPoseCenter(poseB.keypoints);
-  var distCenter = Math.hypot(centerA.x - centerB.x, centerA.y - centerB.y);
-  var handsA = getPoseHands(poseA.keypoints);
-  var handsB = getPoseHands(poseB.keypoints);
-  var distLeft = Math.hypot(handsA.left.x - handsB.left.x, handsA.left.y - handsB.left.y);
-  var distRight = Math.hypot(handsA.right.x - handsB.right.x, handsA.right.y - handsB.right.y);
-  return distCenter * 0.4 + distLeft * 0.3 + distRight * 0.3;
-}
-
-function startBgm() {
-  if (!bgmEl) return;
-  bgmEl.src = BGM_PATH;
-  bgmEl.play().catch(function (e) {
-    console.warn('BGM playback failed:', e.message);
-  });
-}
-
-function calculateMotion(prevPose, currentPose) {
-  if (!prevPose || !currentPose || !prevPose.keypoints || !currentPose.keypoints) return 0;
-  var totalMovement = 0;
-  var count = 0;
-  for (var i = 0; i < currentPose.keypoints.length; i++) {
-    var currKp = currentPose.keypoints[i];
-    if (currKp.score < MIN_KEYPOINT_SCORE) continue;
-    var prevKp = prevPose.keypoints[i]; // インデックス対応前提
-    if (!prevKp || prevKp.score < MIN_KEYPOINT_SCORE) continue;
-
-    var dx = currKp.x - prevKp.x;
-    var dy = currKp.y - prevKp.y;
-    totalMovement += Math.sqrt(dx * dx + dy * dy);
-    count++;
-  }
-  return count > 0 ? totalMovement / count : 0;
-}
-
-function initDifficultyButtons() {
-  ['Easy', 'Normal', 'Hard'].forEach(function (label) {
-    var id = 'diff' + label;
-    var btn = document.getElementById(id);
-    if (!btn) return;
-    btn.addEventListener('click', function () {
-      currentDifficulty = label.toLowerCase();
-      document.querySelectorAll('.difficulty button').forEach(function (b) { b.classList.remove('active'); });
-      btn.classList.add('active');
-      if (!gameStarted) {
-        gameStarted = true;
-        startBgm();
-      }
-    });
-  });
-  var normalBtn = document.getElementById('diffNormal');
-  if (normalBtn) normalBtn.classList.add('active');
-}
-
-function initNextPoseButton() {
-  var btn = document.getElementById('nextPoseBtn');
-  if (btn) btn.addEventListener('click', function () {
-    currentTargetIndex = (currentTargetIndex + 1) % TARGET_POSES.length;
-    drawTargetPose();
-    for (var i = 0; i < 4; i++) lastJudgeResult[i] = null;
-  });
-}
-
-async function init() {
-  try {
-    statusEl.textContent = 'モデル読み込み中...';
-    try {
-      // MoveNet: ガクガクしない、関節精度が高い、高速（PoseNetより推奨）
-      var model = poseDetection.SupportedModels.MoveNet;
-      // 複数人同時追跡: MultiPose.Lightning / 1人精度重視: SinglePose.Thunder
-      var detectorConfig = {
-        modelType: 'MultiPose.Lightning',
-        enableSmoothing: true,
-        enableTracking: true,
-        minPoseScore: 0.15,
-        multiPoseMaxDimension: 384
-      };
-      detector = await poseDetection.createDetector(model, detectorConfig);
-    } catch (modelErr) {
-      console.warn('MoveNet load failed, falling back to PoseNet:', modelErr.message);
-      usePoseNet = true;
-      var model = poseDetection.SupportedModels.PoseNet;
-      detector = await poseDetection.createDetector(model, {
-          quantBytes: 4,
-          architecture: 'MobileNetV1',
-          outputStride: 16,
-          inputResolution: { width: 500, height: 500 },
-          multiplier: 0.75
-      });
-    }
-
-    var stream = await navigator.mediaDevices.getUserMedia({
-        video: { width: 640, height: 480, frameRate: 30 }
-    });
-    video.srcObject = stream;
-
-    video.onloadedmetadata = function () {
-      video.play();
-      video.width = video.videoWidth;
-      video.height = video.videoHeight;
-      overlayCanvas.width = video.videoWidth;
-      overlayCanvas.height = video.videoHeight;
-
-      statusEl.textContent = '準備完了。難易度を選んでスタート！';
-      drawTargetPose();
-      initPlayerCountButtons();
-      updateScoreCardVisibility();
-      initDifficultyButtons();
-      initNextPoseButton();
-      updateScoreDisplays();
-      detect();
+    var toScreen = function (p) {
+        return { x: w / 2 + p.x * 60, y: h / 2 + p.y * 60 + 20 };
     };
-  } catch (err) {
-    statusEl.textContent = 'エラー: ' + err.message;
-    console.error(err);
-  }
-}
 
-// ★シンプルな棒人間デザイン設定
-const STYLE = {
-  leftColor: '#00FFFF',   // 左半身 (シアン)
-  rightColor: '#FF00FF',  // 右半身 (マゼンタ)
-  bodyColor: '#FFFFFF',   // 体幹 (白)
-  lineWidth: 6,           // 線の太さ
-  jointRadius: 5,         // 関節の大きさ
-  headRadius: 25,         // 頭の大きさ
-
-  // ラベル設定
-  labelColor: '#FFFFFF',        // 文字色
-  labelFont: 'bold 20px Arial', // フォント
-  labelMargin: 15               // 頭のてっぺんからどれくらい離すか
-};
-
-function drawOverlay(assignedPoses) {
-  try {
-    var ctx = overlayCanvas.getContext('2d');
-    if (!ctx) return;
-
-    var w = overlayCanvas.width;
-    var h = overlayCanvas.height;
-    ctx.clearRect(0, 0, w, h);
-
-    if (!assignedPoses) return;
-
-    ctx.lineCap = 'round';
-    ctx.lineJoin = 'round';
-    ctx.shadowBlur = 0;
-
-    for (var p = 0; p < maxPlayerCount; p++) {
-      var pose = assignedPoses[p];
-      // キーポイントがない、またはすべてスコア不足ならスキップ
-      if (!pose || !pose.keypoints) continue;
-
-      var kp = pose.keypoints;
-
-      // 座標変換（鏡写し）
-      // PoseNet(flipHorizontal): 既に反転済み→w-xで描画。MoveNet: カメラ座標→そのまま描画（overlayのscaleX(-1)で反転）
-      var km = {};
-      var validCount = 0;
-      kp.forEach(function(k) {
-        if (k.score > MIN_KEYPOINT_SCORE) {
-          km[k.name] = usePoseNet ? { x: w - k.x, y: k.y } : { x: k.x, y: k.y };
-          validCount++;
+    [
+        ['left_shoulder', 'right_shoulder'], ['left_shoulder', 'left_elbow'], ['left_elbow', 'left_wrist'],
+        ['right_shoulder', 'right_elbow'], ['right_elbow', 'right_wrist'],
+        ['left_shoulder', 'left_hip'], ['right_shoulder', 'right_hip'], ['left_hip', 'right_hip']
+    ].forEach(function (edge) {
+        if (kps[edge[0]] && kps[edge[1]]) {
+            var p1 = toScreen(kps[edge[0]]);
+            var p2 = toScreen(kps[edge[1]]);
+            targetCtx.moveTo(p1.x, p1.y);
+            targetCtx.lineTo(p2.x, p2.y);
         }
-      });
+    });
+    targetCtx.stroke();
 
-      if (validCount < 5) continue;
-
-      // --- 描画ヘルパー ---
-      function drawLine(p1, p2, color) {
-        if (p1 && p2) {
-          ctx.beginPath();
-          ctx.moveTo(p1.x, p1.y);
-          ctx.lineTo(p2.x, p2.y);
-          ctx.strokeStyle = color;
-          ctx.lineWidth = STYLE.lineWidth;
-          ctx.stroke();
-        }
-      }
-
-      function drawJoint(name, color) {
-        if (km[name]) {
-          ctx.beginPath();
-          ctx.arc(km[name].x, km[name].y, STYLE.jointRadius, 0, Math.PI * 2);
-          ctx.fillStyle = color;
-          ctx.fill();
-        }
-      }
-
-      function getMidPoint(p1, p2) {
-        if (!p1 || !p2) return null;
-        return { x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 };
-      }
-
-      // --- 1. ボーン（骨組み） ---
-      var shoulderCenter = getMidPoint(km['left_shoulder'], km['right_shoulder']);
-      var hipCenter = getMidPoint(km['left_hip'], km['right_hip']);
-
-      // 肩・腰の横線
-      if (km['left_shoulder'] && km['right_shoulder']) drawLine(km['left_shoulder'], km['right_shoulder'], STYLE.bodyColor);
-      if (km['left_hip'] && km['right_hip']) drawLine(km['left_hip'], km['right_hip'], STYLE.bodyColor);
-
-      // 背骨
-      if (shoulderCenter && hipCenter) {
-        drawLine(shoulderCenter, hipCenter, STYLE.bodyColor);
-      } else {
-        if (km['left_shoulder'] && km['left_hip']) drawLine(km['left_shoulder'], km['left_hip'], STYLE.bodyColor);
-        if (km['right_shoulder'] && km['right_hip']) drawLine(km['right_shoulder'], km['right_hip'], STYLE.bodyColor);
-      }
-
-      // 手足
-      drawLine(km['left_shoulder'], km['left_elbow'], STYLE.leftColor);
-      drawLine(km['left_elbow'], km['left_wrist'], STYLE.leftColor);
-      drawLine(km['left_hip'], km['left_knee'], STYLE.leftColor);
-      drawLine(km['left_knee'], km['left_ankle'], STYLE.leftColor);
-
-      drawLine(km['right_shoulder'], km['right_elbow'], STYLE.rightColor);
-      drawLine(km['right_elbow'], km['right_wrist'], STYLE.rightColor);
-      drawLine(km['right_hip'], km['right_knee'], STYLE.rightColor);
-      drawLine(km['right_knee'], km['right_ankle'], STYLE.rightColor);
-
-      // --- 2. ジョイント ---
-      ['left_shoulder', 'left_elbow', 'left_wrist', 'left_hip', 'left_knee', 'left_ankle']
-        .forEach(function(n) { drawJoint(n, STYLE.leftColor); });
-
-      ['right_shoulder', 'right_elbow', 'right_wrist', 'right_hip', 'right_knee', 'right_ankle']
-        .forEach(function(n) { drawJoint(n, STYLE.rightColor); });
-
-
-      // --- 3. 顔と情報表示 ---
-      var faceParts = ['nose', 'left_eye', 'right_eye', 'left_ear', 'right_ear'];
-      var fx = 0, fy = 0, fCount = 0;
-      faceParts.forEach(function(name) {
-        if (km[name]) {
-          fx += km[name].x;
-          fy += km[name].y;
-          fCount++;
-        }
-      });
-
-      if (fCount === 0 && shoulderCenter) {
-        fx = shoulderCenter.x;
-        fy = shoulderCenter.y - 50;
-        fCount = 1;
-      }
-
-      if (fCount > 0) {
-        var faceX = fx / fCount;
-        var faceY = fy / fCount;
-
-        // 顔の円
-        ctx.beginPath();
-        ctx.arc(faceX, faceY, STYLE.headRadius, 0, Math.PI * 2);
-        ctx.strokeStyle = STYLE.bodyColor;
-        ctx.lineWidth = 4;
-        ctx.stroke();
-        ctx.fillStyle = 'rgba(255, 255, 255, 0.3)';
-        ctx.fill();
-
-        // ★ラベル表示（プレイヤー番号 + 一致率）
-        ctx.fillStyle = STYLE.labelColor;
-        ctx.font = STYLE.labelFont;
-        ctx.textAlign = 'center';
-
-        var similarity = pose.similarity || 0;
-        var scorePercent = Math.floor(similarity * 100);
-        var labelText = 'P' + (p + 1) + ' (' + scorePercent + '%)';
-
-        var labelY = faceY - STYLE.headRadius - STYLE.labelMargin;
-        var textHeight = 24;
-
-        if (labelY < textHeight) {
-          ctx.textBaseline = 'top';
-          labelY = faceY + STYLE.headRadius + 10;
-        } else {
-          ctx.textBaseline = 'bottom';
-        }
-
-        // 合格表示：一致率85%以上で緑色
-        if (scorePercent >= 85) {
-            ctx.fillStyle = '#00FF00';
-        } else {
-            ctx.fillStyle = '#FFFFFF';
-        }
-
-        // overlayCanvas に transform: scaleX(-1) がかかっているため、文字を正面向きにする
-        ctx.save();
-        ctx.translate(faceX, labelY);
-        ctx.scale(-1, 1);
-        ctx.translate(-faceX, -labelY);
-        ctx.fillText(labelText, faceX, labelY);
-        ctx.restore();
-      }
-    }
-
-  } catch (err) {
-    console.error('drawOverlay error', err);
-  }
-}
-
-
-async function detect() {
-  try {
-    window.detectionRunning = true;
-    if (!detector) { requestAnimationFrame(detect); return; }
-
-    // readyState チェックの緩和
-    if (!video || video.readyState < 2) {
-      requestAnimationFrame(detect);
-      return;
-    }
-
-    // ビデオサイズが正しく取得できるまで待つ（座標計算の狂い防止）
-    if (video.videoWidth === 0 || video.videoHeight === 0) {
-      requestAnimationFrame(detect);
-      return;
-    }
-
-    var vw = video.videoWidth;
-    var vh = video.videoHeight;
-
-    if (video.width !== vw || video.height !== vh) {
-        video.width = vw;
-        video.height = vh;
-    }
-
-    if (overlayCanvas.width !== vw || overlayCanvas.height !== vh) {
-      overlayCanvas.width = vw;
-      overlayCanvas.height = vh;
-    }
-
-    // MoveNet / PoseNet 共通の推論設定
-    var estimationConfig = {
-      maxPoses: maxPlayerCount,
-      flipHorizontal: true
-    };
-    if (usePoseNet) {
-      estimationConfig.scoreThreshold = 0.15;
-    }
-
-    window.poseDetectionCount++;
-    var poses;
-    try {
-      poses = await detector.estimatePoses(video, estimationConfig);
-    } catch (poseErr) {
-      console.warn('estimatePoses error:', poseErr);
-      requestAnimationFrame(detect);
-      return;
-    }
-
-    if (!poses) poses = [];
-
-    // ★割り当て処理
-    var assigned = assignPlayers(poses);
-
-    // ★スムージング処理（ここで座標を安定化させる）
-    smoothPoses(poses, assigned);
-
-    var target = TARGET_POSES[currentTargetIndex];
-    var threshold = DIFFICULTY_THRESHOLD[currentDifficulty] || 0.85;
-    var now = Date.now();
-
-    for (var p = 0; p < maxPlayerCount; p++) {
-      lastPlayerPoses[p] = assigned[p];
-      lastJudgeResult[p] = null;
-
-      if (!assigned[p]) continue;
-
-      // 類似度計算（スムージング後の座標を使用）
-      if (target && target.keypoints) {
-        var userMap = keypointsToMap(assigned[p].keypoints);
-        var normUser = normalizePose(userMap);
-        var sim = poseSimilarity(normUser, target.keypoints);
-
-        assigned[p].similarity = sim;
-
-        if (sim >= threshold) {
-          if (now >= playerCooldownUntil[p]) {
-            playerScores[p]++;
-            playerCooldownUntil[p] = now + COOLDOWN_MS;
-            updateScoreDisplays();
-          }
-          lastJudgeResult[p] = true;
-        } else {
-          lastJudgeResult[p] = false;
-        }
-      }
-    }
-
-    drawOverlay(assigned);
-
-    for (var p = 0; p < 4; p++) {
-      if (assigned[p]) {
-        previousPosePositions[p] = JSON.parse(JSON.stringify(assigned[p]));
-      } else {
-        previousPosePositions[p] = null;
-      }
-    }
-
-  } catch (err) {
-    console.error('detect error', err);
-  }
-  requestAnimationFrame(detect);
+    targetCtx.beginPath();
+    targetCtx.arc(w / 2, h / 2 - 0.5 * 60 + 20, 10, 0, 2 * Math.PI);
+    targetCtx.stroke();
 }
 
 init();

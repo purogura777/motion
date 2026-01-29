@@ -3,84 +3,112 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>ポーズ合わせゲーム</title>
+    <title>ポーズ合わせゲーム (MoveNet版)</title>
     <style>
         * { box-sizing: border-box; }
         html, body { height: 100%; margin: 0; overflow: hidden; }
-        body { font-family: 'Arial', sans-serif; background: #f0f2f5; display: flex; flex-direction: column; align-items: center; width: 100%; }
-        h1 { margin: 8px 0; font-size: clamp(1rem, 4vw, 1.5rem); flex-shrink: 0; }
+        body { font-family: 'Arial', sans-serif; background: #20232a; color: #fff; display: flex; flex-direction: column; align-items: center; width: 100%; }
+        h1 { margin: 8px 0; font-size: clamp(1rem, 4vw, 1.5rem); flex-shrink: 0; text-shadow: 0 2px 4px rgba(0,0,0,0.5); }
+
         .top-row { display: flex; gap: 10px; margin: 5px 0; align-items: flex-start; justify-content: center; flex-wrap: wrap; width: 100%; max-width: 100%; padding: 0 10px; flex-shrink: 0; }
-        .scores-section { display: flex; flex-direction: column; gap: 6px; align-items: center; }
+
+        .target-area { width: 140px; background: #333; border-radius: 12px; padding: 10px; text-align: center; box-shadow: 0 4px 6px rgba(0,0,0,0.3); }
+        .target-area h3 { margin: 0 0 5px 0; font-size: 0.9rem; color: #aaa; }
+        #targetCanvas { width: 100%; aspect-ratio: 3/4; background: #000; border-radius: 8px; border: 1px solid #444; }
+        #targetName { margin: 5px 0 0 0; font-size: 0.9rem; font-weight: bold; min-height: 1.2em; }
+
+        .scores-section { display: flex; flex-direction: column; gap: 8px; align-items: center; }
         .scores { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
-        .score-card { min-width: 60px; padding: 6px 10px; border-radius: 8px; background: white; text-align: center; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
-        .score-card .label { font-size: 0.8rem; color: #666; }
-        .score-card .point { font-size: 1.4rem; font-weight: bold; color: #333; }
-        .difficulty { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; justify-content: center; }
-        .difficulty button { padding: 6px 12px; border-radius: 6px; border: 1px solid #ccc; background: white; cursor: pointer; font-size: 0.85rem; }
-        .difficulty button.active { background: #4CAF50; color: white; border-color: #4CAF50; }
-        .player-count { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; justify-content: center; }
-        .player-count button { padding: 6px 12px; border-radius: 6px; border: 1px solid #ccc; background: white; cursor: pointer; font-size: 0.85rem; }
-        .player-count button.active { background: #2196F3; color: white; border-color: #2196F3; }
-        .main { flex: 1; min-height: 0; width: 100%; max-width: 100%; padding: 0; display: flex; flex-direction: column; }
-        .target-area { width: clamp(120px, 20vw, 200px); min-height: 0; padding: 10px; border-radius: 8px; background: white; box-shadow: 0 2px 4px rgba(0,0,0,0.1); text-align: center; flex-shrink: 0; }
-        .target-area h3 { margin: 0 0 6px 0; font-size: 0.9rem; }
-        #targetCanvas { width: 100%; max-width: 160px; height: auto; aspect-ratio: 160/200; margin: 0 auto; display: block; background: #fafafa; border-radius: 6px; }
-        .camera-area { flex: 1; min-height: 0; width: 100%; display: flex; align-items: center; justify-content: center; padding: 10px; }
-        .camera-inner { position: relative; width: 100%; max-width: 640px; aspect-ratio: 4/3; overflow: hidden; border-radius: 8px; }
-        #webcam { width: 100%; height: 100%; transform: scaleX(-1); display: block; object-fit: cover; object-position: center; }
-        #overlayCanvas { position: absolute; left: 0; top: 0; width: 100%; height: 100%; transform: scaleX(-1); pointer-events: none; }
-        #status { font-size: 0.9rem; margin: 4px 0; min-height: 1.2rem; color: #666; flex-shrink: 0; }
-        #nextPoseBtn { margin-top: 6px; padding: 6px 12px; border-radius: 6px; border: 1px solid #2196F3; background: #2196F3; color: white; cursor: pointer; font-size: 0.85rem; }
+        .score-card { min-width: 70px; padding: 8px; border-radius: 8px; background: #444; text-align: center; border-bottom: 4px solid #666; transition: all 0.2s; }
+        .score-card.active { background: #555; border-bottom-color: #2196F3; transform: translateY(-2px); }
+        .score-card .label { font-size: 0.75rem; color: #bbb; margin-bottom: 2px; }
+        .score-card .point { font-size: 1.5rem; font-weight: bold; color: #fff; }
+
+        .controls { display: flex; flex-direction: column; gap: 6px; align-items: center; }
+        .control-group { display: flex; gap: 4px; align-items: center; background: rgba(255,255,255,0.1); padding: 4px 8px; border-radius: 20px; }
+        .control-group span { font-size: 0.75rem; color: #aaa; margin-right: 4px; }
+
+        button { border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: 0.8rem; font-weight: bold; transition: background 0.2s; }
+        .btn-group button { background: transparent; color: #ccc; }
+        .btn-group button.active { background: #2196F3; color: white; box-shadow: 0 2px 4px rgba(0,0,0,0.2); }
+        .btn-group button:hover:not(.active) { background: rgba(255,255,255,0.1); }
+
+        #nextPoseBtn { width: 100%; margin-top: 8px; background: #2196F3; color: white; padding: 8px; border-radius: 6px; }
+        #nextPoseBtn:active { transform: scale(0.98); }
+        #autoSwitchBtn { width: 100%; margin-top: 4px; background: #555; color: #ccc; padding: 6px; border-radius: 6px; font-size: 0.75rem; }
+        #autoSwitchBtn.active { background: #4CAF50; color: white; }
+
+        .main { flex: 1; min-height: 0; width: 100%; display: flex; flex-direction: column; justify-content: center; padding: 10px; }
+        .camera-area { position: relative; width: 100%; max-width: 800px; margin: 0 auto; aspect-ratio: 4/3; background: #000; border-radius: 12px; overflow: hidden; box-shadow: 0 8px 16px rgba(0,0,0,0.5); }
+
+        /* 重要: カメラ映像自体をCSSで反転させる。
+           MoveNetには flipHorizontal: true を渡すが、
+           描画と映像を一致させるため、映像コンテナごと反転が一番自然。
+        */
+        .camera-inner { width: 100%; height: 100%; position: relative; transform: scaleX(-1); }
+
+        #webcam { width: 100%; height: 100%; object-fit: cover; }
+        #overlayCanvas { position: absolute; left: 0; top: 0; width: 100%; height: 100%; }
+
+        #status { font-size: 0.9rem; color: #888; margin-top: 5px; min-height: 1.2rem; }
+
+        /* ローディング表示 */
+        #loading { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); background: rgba(0,0,0,0.8); padding: 20px; border-radius: 8px; z-index: 10; display: none; }
     </style>
 </head>
 <body>
-    <h1>ポーズ合わせゲーム</h1>
+    <h1>ポーズ合わせゲーム Move</h1>
 
     <div class="top-row">
         <div class="target-area">
-            <h3>お題ポーズ</h3>
-            <canvas id="targetCanvas" width="160" height="200"></canvas>
-            <p id="targetName" style="margin: 8px 0 0 0; font-size: 0.9rem;">-</p>
-            <button type="button" id="nextPoseBtn">次のポーズ</button>
+            <h3>お題</h3>
+            <canvas id="targetCanvas" width="120" height="160"></canvas>
+            <div id="targetName">-</div>
+            <button id="nextPoseBtn">スキップ</button>
+            <button id="autoSwitchBtn" class="auto-switch-btn">自動切り替え OFF</button>
         </div>
+
         <div class="scores-section">
-            <div class="scores" id="scoresArea">
-                <div class="score-card"><div class="label">P1</div><div id="score1" class="point">0</div></div>
-                <div class="score-card"><div class="label">P2</div><div id="score2" class="point">0</div></div>
-                <div class="score-card"><div class="label">P3</div><div id="score3" class="point">0</div></div>
-                <div class="score-card"><div class="label">P4</div><div id="score4" class="point">0</div></div>
+            <div class="scores">
+                <div class="score-card" id="card1"><div class="label">P1</div><div id="score1" class="point">0</div></div>
+                <div class="score-card" id="card2"><div class="label">P2</div><div id="score2" class="point">0</div></div>
+                <div class="score-card" id="card3"><div class="label">P3</div><div id="score3" class="point">0</div></div>
+                <div class="score-card" id="card4"><div class="label">P4</div><div id="score4" class="point">0</div></div>
             </div>
-            <div class="player-count">
-                <span>人数:</span>
-                <button type="button" id="players1" data-count="1">1人</button>
-                <button type="button" id="players2" data-count="2">2人</button>
-                <button type="button" id="players3" data-count="3">3人</button>
-                <button type="button" id="players4" data-count="4">4人</button>
-            </div>
-            <div class="difficulty">
-                <span>難易度:</span>
-                <button type="button" id="diffEasy" data-diff="easy">かんたん</button>
-                <button type="button" id="diffNormal" data-diff="normal">ふつう</button>
-                <button type="button" id="diffHard" data-diff="hard">むずかしい</button>
+
+            <div class="controls">
+                <div class="control-group btn-group player-count">
+                    <span>人数</span>
+                    <button data-count="1">1</button>
+                    <button data-count="2">2</button>
+                    <button data-count="3">3</button>
+                    <button data-count="4" class="active">4</button>
+                </div>
+                <div class="control-group btn-group difficulty">
+                    <span>難易度</span>
+                    <button id="diffEasy" data-diff="easy">Easy</button>
+                    <button id="diffNormal" data-diff="normal" class="active">Normal</button>
+                    <button id="diffHard" data-diff="hard">Hard</button>
+                </div>
             </div>
         </div>
     </div>
 
     <div class="main">
         <div class="camera-area">
+            <div id="loading">モデル読込中...</div>
             <div class="camera-inner">
                 <video id="webcam" autoplay playsinline></video>
-                <canvas id="overlayCanvas" width="400" height="300"></canvas>
+                <canvas id="overlayCanvas"></canvas>
             </div>
         </div>
+        <p id="status">カメラ起動待ち...</p>
     </div>
-
-    <p id="status">カメラ起動中...</p>
 
     <audio id="bgm" loop></audio>
 
-    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@3.18.0/dist/tf.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/pose-detection@2.0.0/dist/pose-detection.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.10.0/dist/tf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/pose-detection@2.1.0/dist/pose-detection.min.js"></script>
     <script src="script.js" defer></script>
 </body>
 </html>
