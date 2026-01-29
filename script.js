@@ -9,6 +9,8 @@ const BGM_PATH = 'music/bgm.mp3';
 const DIFFICULTY_THRESHOLD = { easy: 0.40, normal: 0.50, hard: 0.60 };
 const COOLDOWN_MS = 2500;
 const MIN_KEYPOINT_SCORE = 0.25;
+const PHOTO_COOLDOWN_MS = 3000;
+const MIN_POSE_SCORE_FOR_PHOTO = 0.5;
 
 const COCO_KEYPOINT_NAMES = [
   'nose', 'left_eye', 'right_eye', 'left_ear', 'right_ear',
@@ -40,6 +42,8 @@ let playerCooldownUntil = [0, 0, 0, 0];
 let lastPlayerPoses = [null, null, null, null];
 let lastJudgeResult = [null, null, null, null];
 let gameStarted = false;
+let lastPhotoTime = 0;
+let photoCanvas = null;
 
 const video = document.getElementById('webcam');
 const statusEl = document.getElementById('status');
@@ -217,6 +221,33 @@ function startBgm() {
   });
 }
 
+function takePhoto() {
+  var now = Date.now();
+  if (now - lastPhotoTime < PHOTO_COOLDOWN_MS) return;
+  if (!photoCanvas) {
+    photoCanvas = document.createElement('canvas');
+    photoCanvas.width = video.videoWidth || 400;
+    photoCanvas.height = video.videoHeight || 300;
+  }
+  var ctx = photoCanvas.getContext('2d');
+  ctx.save();
+  ctx.scale(-1, 1);
+  ctx.drawImage(video, -photoCanvas.width, 0, photoCanvas.width, photoCanvas.height);
+  ctx.restore();
+  photoCanvas.toBlob(function (blob) {
+    if (!blob) return;
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = 'pose_' + new Date().toISOString().replace(/[:.]/g, '-') + '.jpg';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    lastPhotoTime = now;
+  }, 'image/jpeg', 0.9);
+}
+
 function initDifficultyButtons() {
   ['Easy', 'Normal', 'Hard'].forEach(function (label, idx) {
     var id = 'diff' + label;
@@ -316,6 +347,25 @@ async function detect() {
       drawOverlay(null);
       requestAnimationFrame(detect);
       return;
+    }
+    var hasValidPose = false;
+    for (var i = 0; i < poses.length; i++) {
+      var pose = poses[i];
+      var keypoints = pose.keypoints || [];
+      var validKeypointCount = 0;
+      for (var j = 0; j < keypoints.length; j++) {
+        var kp = keypoints[j];
+        if (kp && kp.score && kp.score >= MIN_KEYPOINT_SCORE) {
+          validKeypointCount++;
+        }
+      }
+      if (validKeypointCount >= 8) {
+        hasValidPose = true;
+        break;
+      }
+    }
+    if (hasValidPose) {
+      takePhoto();
     }
     var assigned = assignPlayers(poses);
     var target = TARGET_POSES[currentTargetIndex];
