@@ -326,6 +326,7 @@ function drawOverlay(assignedPoses) {
     }
     var prevPose = previousPosePositions[p];
     var motion = calculateMotion(prevPose, pose);
+    window.motionDetectionCount++;
     var isMoving = motion > MOTION_THRESHOLD;
     var color = isMoving ? '#f44336' : '#4CAF50';
     var padding = 20;
@@ -386,8 +387,13 @@ function drawOverlay(assignedPoses) {
   }
 }
 
+window.detectionRunning = false;
+window.poseDetectionCount = 0;
+window.motionDetectionCount = 0;
+
 async function detect() {
   try {
+    window.detectionRunning = true;
     if (!detector) { requestAnimationFrame(detect); return; }
     if (!video || video.readyState !== 4) {
       requestAnimationFrame(detect);
@@ -398,6 +404,7 @@ async function detect() {
       return;
     }
     var estimationConfig = { maxPoses: 4, flipHorizontal: true };
+    window.poseDetectionCount++;
     var poses = await detector.estimatePoses(video, estimationConfig);
     if (!poses || !poses.length) {
       lastPlayerPoses = [null, null, null, null];
