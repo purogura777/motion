@@ -23,7 +23,7 @@ const STYLE = {
   // ラベル設定
   labelColor: '#FFFFFF',        // 文字色
   labelFont: 'bold 24px Arial', // フォント
-  labelMargin: 15               // 頭のてっぺんからどれくらい離すか
+  labelMargin: 50               // 肩の位置からどれくらい上に表示するか
 };
 
 const COCO_KEYPOINT_NAMES = [
@@ -224,27 +224,54 @@ function updateScoreDisplays() {
 
 function assignPlayers(poses) {
   var now = Date.now();
-  var assigned = [];
-  var used = {};
+  var assigned = [null, null, null, null];
+  
+  if (!poses || poses.length === 0) return assigned;
+  
+  // ポーズをx座標でソート（左から順に1P、2P...）
+  var posesWithIndex = poses.map(function(pose, idx) {
+    var center = getPoseCenter(pose.keypoints);
+    return { pose: pose, index: idx, centerX: center.x };
+  });
+  posesWithIndex.sort(function(a, b) {
+    return a.centerX - b.centerX; // x座標が小さい（左側）から順
+  });
+  
+  // 前回のポーズがある場合は、前回のポーズに最も近いものを優先
   for (var p = 0; p < 4; p++) {
-    var bestIdx = -1;
-    var bestDist = Infinity;
     var prev = lastPlayerPoses[p];
     var prevCenter = prev ? getPoseCenter(prev.keypoints) : null;
-    for (var i = 0; i < poses.length; i++) {
-      if (used[i]) continue;
-      var kp = poses[i].keypoints;
-      var center = getPoseCenter(kp);
-      var dist = prevCenter ? Math.hypot(center.x - prevCenter.x, center.y - prevCenter.y) : i;
-      if (dist < bestDist) { bestDist = dist; bestIdx = i; }
+    
+    var bestIdx = -1;
+    var bestDist = Infinity;
+    
+    for (var i = 0; i < posesWithIndex.length; i++) {
+      if (posesWithIndex[i].assigned) continue; // 既に割り当て済み
+      
+      var currentPose = posesWithIndex[i].pose;
+      var currentCenter = getPoseCenter(currentPose.keypoints);
+      
+      var dist;
+      if (prevCenter) {
+        // 前回のポーズがある場合は距離で判定
+        dist = Math.hypot(currentCenter.x - prevCenter.x, currentCenter.y - prevCenter.y);
+      } else {
+        // 前回のポーズがない場合は、x座標の順序で判定
+        dist = Math.abs(currentCenter.x - (p * 200)); // 仮の位置
+      }
+      
+      if (dist < bestDist) {
+        bestDist = dist;
+        bestIdx = i;
+      }
     }
+    
     if (bestIdx >= 0) {
-      used[bestIdx] = true;
-      assigned[p] = poses[bestIdx];
-    } else {
-      assigned[p] = null;
+      posesWithIndex[bestIdx].assigned = true;
+      assigned[p] = posesWithIndex[bestIdx].pose;
     }
   }
+  
   return assigned;
 }
 
@@ -424,48 +451,19 @@ function drawOverlay(assignedPoses) {
         .forEach(function(n) { drawJoint(n, STYLE.rightColor); });
 
 
-      // --- 3. 顔とラベル ---
-      var faceParts = ['nose', 'left_eye', 'right_eye', 'left_ear', 'right_ear'];
-      var fx = 0, fy = 0, fCount = 0;
-      for (var f = 0; f < faceParts.length; f++) {
-        var name = faceParts[f];
-        if (km[name]) {
-          fx += km[name].x;
-          fy += km[name].y;
-          fCount++;
-        }
-      }
-
-      // 顔パーツが見つからない場合のフォールバック（肩の中心から少し上）
-      if (fCount === 0 && km['left_shoulder'] && km['right_shoulder']) {
-        fx = (km['left_shoulder'].x + km['right_shoulder'].x) / 2;
-        fy = (km['left_shoulder'].y + km['right_shoulder'].y) / 2 - 50;
-        fCount = 1;
-      }
-
-      if (fCount > 0) {
-        var faceX = fx / fCount;
-        var faceY = fy / fCount;
-
-        // 顔（シンプルな丸）
-        ctx.beginPath();
-        ctx.arc(faceX, faceY, STYLE.headRadius, 0, Math.PI * 2);
-        ctx.strokeStyle = STYLE.bodyColor;
-        ctx.lineWidth = 4;
-        ctx.stroke();
-        // 中を少し半透明の白で塗る（背景が見えるように）
-        ctx.fillStyle = 'rgba(255, 255, 255, 0.3)';
-        ctx.fill();
-
-        // ★ラベル表示（確実に頭の上に配置）
-        // 「顔の中心」から「半径」分上に移動し、さらに「マージン」分上げる
-        var labelY = faceY - STYLE.headRadius - STYLE.labelMargin;
+      // --- 3. ラベル表示（肩の位置から計算） ---
+      if (km['left_shoulder'] && km['right_shoulder']) {
+        var shoulderCenterX = (km['left_shoulder'].x + km['right_shoulder'].x) / 2;
+        var shoulderCenterY = Math.min(km['left_shoulder'].y, km['right_shoulder'].y);
+        
+        // 肩の位置から上にマージン分離してラベルを表示
+        var labelY = shoulderCenterY - STYLE.labelMargin;
 
         ctx.fillStyle = STYLE.labelColor;
         ctx.font = STYLE.labelFont;
         ctx.textAlign = 'center';
         ctx.textBaseline = 'bottom'; // 文字の下端を基準にする
-        ctx.fillText('P' + (p + 1), faceX, labelY);
+        ctx.fillText('P' + (p + 1), shoulderCenterX, labelY);
       }
     }
 
