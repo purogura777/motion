@@ -491,15 +491,17 @@ async function init() {
   try {
     statusEl.textContent = 'モデル読み込み中...';
     try {
-      // MoveNet: 標準でスムージングが強力、スケルトンが安定（PoseNetより推奨）
+      // MoveNet: ガクガクしない、関節精度が高い、高速（PoseNetより推奨）
       var model = poseDetection.SupportedModels.MoveNet;
-      detector = await poseDetection.createDetector(model, {
-          modelType: 'MultiPose.Lightning',
-          enableSmoothing: true,
-          enableTracking: true,
-          minPoseScore: 0.15,
-          multiPoseMaxDimension: 384
-      });
+      // 複数人同時追跡: MultiPose.Lightning / 1人精度重視: SinglePose.Thunder
+      var detectorConfig = {
+        modelType: 'MultiPose.Lightning',
+        enableSmoothing: true,
+        enableTracking: true,
+        minPoseScore: 0.15,
+        multiPoseMaxDimension: 384
+      };
+      detector = await poseDetection.createDetector(model, detectorConfig);
     } catch (modelErr) {
       console.warn('MoveNet load failed, falling back to PoseNet:', modelErr.message);
       usePoseNet = true;
@@ -753,12 +755,14 @@ async function detect() {
       overlayCanvas.height = vh;
     }
 
-    // MoveNet は estimatePoses の config が異なる。PoseNet フォールバック時は config を渡す
-    var estimationConfig = usePoseNet ? {
+    // MoveNet / PoseNet 共通の推論設定
+    var estimationConfig = {
       maxPoses: maxPlayerCount,
-      flipHorizontal: true,
-      scoreThreshold: 0.15
-    } : {};
+      flipHorizontal: true
+    };
+    if (usePoseNet) {
+      estimationConfig.scoreThreshold = 0.15;
+    }
 
     window.poseDetectionCount++;
     var poses;
