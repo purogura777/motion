@@ -11,7 +11,7 @@ const COOLDOWN_MS = 2500;
 const MIN_KEYPOINT_SCORE = 0.25;
 const MOTION_THRESHOLD = 15;
 
-// シンプルな棒人間デザイン設定
+// ★シンプルな棒人間デザイン設定
 const STYLE = {
   leftColor: '#00FFFF',   // 左半身 (シアン)
   rightColor: '#FF00FF',  // 右半身 (マゼンタ)
@@ -23,7 +23,7 @@ const STYLE = {
   // ラベル設定
   labelColor: '#FFFFFF',        // 文字色
   labelFont: 'bold 24px Arial', // フォント
-  labelMargin: 120              // 肩の位置からどれくらい上に表示するか（目を認識する視点のさらに上）
+  labelMargin: 15               // 頭のてっぺんからどれくらい離すか
 };
 
 const COCO_KEYPOINT_NAMES = [
@@ -391,10 +391,8 @@ function drawOverlay(assignedPoses) {
     
     if (!assignedPoses) return;
 
-    // 線の端を丸くする（棒人間らしく）
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
-    // 発光エフェクトは削除（シンプル化）
     ctx.shadowBlur = 0;
 
     for (var p = 0; p < assignedPoses.length; p++) {
@@ -406,22 +404,21 @@ function drawOverlay(assignedPoses) {
       // 座標変換（鏡写し）
       var km = {};
       var validCount = 0;
-      for (var i = 0; i < kp.length; i++) {
-        var k = kp[i];
-        if (k && k.score && k.score >= MIN_KEYPOINT_SCORE) {
+      kp.forEach(function(k) {
+        if (k.score > MIN_KEYPOINT_SCORE) {
           km[k.name] = { x: w - k.x, y: k.y }; 
           validCount++;
         }
-      }
+      });
       
       if (validCount < 5) continue;
 
-      // --- 描画関数 ---
-      function drawLimb(name1, name2, color) {
-        if (km[name1] && km[name2]) {
+      // --- 描画ヘルパー ---
+      function drawLine(p1, p2, color) {
+        if (p1 && p2) {
           ctx.beginPath();
-          ctx.moveTo(km[name1].x, km[name1].y);
-          ctx.lineTo(km[name2].x, km[name2].y);
+          ctx.moveTo(p1.x, p1.y);
+          ctx.lineTo(p2.x, p2.y);
           ctx.strokeStyle = color;
           ctx.lineWidth = STYLE.lineWidth;
           ctx.stroke();
@@ -436,41 +433,49 @@ function drawOverlay(assignedPoses) {
           ctx.fill();
         }
       }
-
-      // --- 1. ボーン（骨組み）の描画 ---
-      // 体幹
-      drawLimb('left_shoulder', 'right_shoulder', STYLE.bodyColor);
-      drawLimb('left_hip', 'right_hip', STYLE.bodyColor);
-      drawLimb('left_shoulder', 'left_hip', STYLE.leftColor);
-      drawLimb('right_shoulder', 'right_hip', STYLE.rightColor);
       
-      // 胴体の縦線（肩の中心と腰の中心を結ぶ）
-      if (km['left_shoulder'] && km['right_shoulder'] && km['left_hip'] && km['right_hip']) {
-        var shoulderCenterX = (km['left_shoulder'].x + km['right_shoulder'].x) / 2;
-        var shoulderCenterY = (km['left_shoulder'].y + km['right_shoulder'].y) / 2;
-        var hipCenterX = (km['left_hip'].x + km['right_hip'].x) / 2;
-        var hipCenterY = (km['left_hip'].y + km['right_hip'].y) / 2;
-        ctx.beginPath();
-        ctx.moveTo(shoulderCenterX, shoulderCenterY);
-        ctx.lineTo(hipCenterX, hipCenterY);
-        ctx.strokeStyle = STYLE.bodyColor;
-        ctx.lineWidth = STYLE.lineWidth;
-        ctx.stroke();
+      // 中点を計算するヘルパー
+      function getMidPoint(p1, p2) {
+        if (!p1 || !p2) return null;
+        return { x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 };
+      }
+
+      // --- 1. ボーン（骨組み） ---
+      
+      // ★胴体（背骨スタイルに変更）
+      var shoulderCenter = getMidPoint(km['left_shoulder'], km['right_shoulder']);
+      var hipCenter = getMidPoint(km['left_hip'], km['right_hip']);
+
+      // 肩の横線
+      if (km['left_shoulder'] && km['right_shoulder']) {
+        drawLine(km['left_shoulder'], km['right_shoulder'], STYLE.bodyColor);
+      }
+      // 腰の横線
+      if (km['left_hip'] && km['right_hip']) {
+        drawLine(km['left_hip'], km['right_hip'], STYLE.bodyColor);
+      }
+      // 背骨（肩の中点 〜 腰の中点）
+      if (shoulderCenter && hipCenter) {
+        drawLine(shoulderCenter, hipCenter, STYLE.bodyColor);
+      } else {
+        // もし背骨が描けない場合（腰が見えてないなど）は、脇腹を描くフォールバック
+        drawLine(km['left_shoulder'], km['left_hip'], STYLE.bodyColor);
+        drawLine(km['right_shoulder'], km['right_hip'], STYLE.bodyColor);
       }
 
       // 左手足
-      drawLimb('left_shoulder', 'left_elbow', STYLE.leftColor);
-      drawLimb('left_elbow', 'left_wrist', STYLE.leftColor);
-      drawLimb('left_hip', 'left_knee', STYLE.leftColor);
-      drawLimb('left_knee', 'left_ankle', STYLE.leftColor);
+      drawLine(km['left_shoulder'], km['left_elbow'], STYLE.leftColor);
+      drawLine(km['left_elbow'], km['left_wrist'], STYLE.leftColor);
+      drawLine(km['left_hip'], km['left_knee'], STYLE.leftColor);
+      drawLine(km['left_knee'], km['left_ankle'], STYLE.leftColor);
 
       // 右手足
-      drawLimb('right_shoulder', 'right_elbow', STYLE.rightColor);
-      drawLimb('right_elbow', 'right_wrist', STYLE.rightColor);
-      drawLimb('right_hip', 'right_knee', STYLE.rightColor);
-      drawLimb('right_knee', 'right_ankle', STYLE.rightColor);
+      drawLine(km['right_shoulder'], km['right_elbow'], STYLE.rightColor);
+      drawLine(km['right_elbow'], km['right_wrist'], STYLE.rightColor);
+      drawLine(km['right_hip'], km['right_knee'], STYLE.rightColor);
+      drawLine(km['right_knee'], km['right_ankle'], STYLE.rightColor);
 
-      // --- 2. ジョイント（関節）の描画 ---
+      // --- 2. ジョイント ---
       ['left_shoulder', 'left_elbow', 'left_wrist', 'left_hip', 'left_knee', 'left_ankle']
         .forEach(function(n) { drawJoint(n, STYLE.leftColor); });
       
@@ -478,24 +483,58 @@ function drawOverlay(assignedPoses) {
         .forEach(function(n) { drawJoint(n, STYLE.rightColor); });
 
 
-      // --- 3. ラベル表示（肩の位置から計算、反転を考慮） ---
-      if (km['left_shoulder'] && km['right_shoulder']) {
-        // 肩の中心（既に反転済みの座標を使用）
-        var shoulderCenterX = (km['left_shoulder'].x + km['right_shoulder'].x) / 2;
-        var shoulderCenterY = Math.min(km['left_shoulder'].y, km['right_shoulder'].y);
-        
-        // 肩の位置から上にマージン分離してラベルを表示（目を認識する視点のさらに上）
-        var labelY = shoulderCenterY - STYLE.labelMargin;
+      // --- 3. 顔とラベル ---
+      var faceParts = ['nose', 'left_eye', 'right_eye', 'left_ear', 'right_ear'];
+      var fx = 0, fy = 0, fCount = 0;
+      faceParts.forEach(function(name) {
+        if (km[name]) {
+          fx += km[name].x;
+          fy += km[name].y;
+          fCount++;
+        }
+      });
 
-        // テキストは反転させない（座標変換は座標のみ、テキストは通常通り）
-        ctx.save(); // 現在の状態を保存
+      // 顔が見つからない場合は肩の中点の上を使う
+      if (fCount === 0 && shoulderCenter) {
+        fx = shoulderCenter.x;
+        fy = shoulderCenter.y - 50;
+        fCount = 1;
+      }
+
+      if (fCount > 0) {
+        var faceX = fx / fCount;
+        var faceY = fy / fCount;
+
+        // 顔の円
+        ctx.beginPath();
+        ctx.arc(faceX, faceY, STYLE.headRadius, 0, Math.PI * 2);
+        ctx.strokeStyle = STYLE.bodyColor;
+        ctx.lineWidth = 4;
+        ctx.stroke();
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.3)';
+        ctx.fill();
+
+        // ★ラベル表示（画面外に行かないように調整）
         ctx.fillStyle = STYLE.labelColor;
         ctx.font = STYLE.labelFont;
         ctx.textAlign = 'center';
-        ctx.textBaseline = 'bottom';
-        // テキストは反転させずに通常通り描画
-        ctx.fillText('P' + (p + 1), shoulderCenterX, labelY);
-        ctx.restore(); // 状態を復元
+        
+        // 基本位置：頭の上
+        var labelY = faceY - STYLE.headRadius - STYLE.labelMargin;
+        var textMetrics = ctx.measureText('P' + (p + 1));
+        var textHeight = 24; // フォントサイズ相当
+
+        // もし画面上端より上に行ってしまうなら、位置を調整
+        if (labelY < textHeight) {
+          // 画面上端ギリギリに留めるか、顔の下に出すか。
+          // ここでは「顔の下（首元あたり）」に出すように切り替えます。
+          ctx.textBaseline = 'top';
+          labelY = faceY + STYLE.headRadius + 10;
+        } else {
+          ctx.textBaseline = 'bottom';
+        }
+
+        ctx.fillText('P' + (p + 1), faceX, labelY);
       }
     }
 
