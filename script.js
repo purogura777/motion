@@ -11,6 +11,16 @@ const COOLDOWN_MS = 2500;
 const MIN_KEYPOINT_SCORE = 0.25;
 const MOTION_THRESHOLD = 15;
 
+// デザイン設定
+const STYLE = {
+  leftColor: '#00FFFF',   // 左半身の色 (シアン)
+  rightColor: '#FF00FF',  // 右半身の色 (マゼンタ)
+  bodyColor: '#FFFFFF',   // 体幹の色 (白)
+  lineWidth: 8,           // 線の太さ
+  jointRadius: 6,         // 関節の丸の大きさ
+  headRadius: 25          // 頭の大きさ
+};
+
 const COCO_KEYPOINT_NAMES = [
   'nose', 'left_eye', 'right_eye', 'left_ear', 'right_ear',
   'left_shoulder', 'right_shoulder', 'left_elbow', 'right_elbow',
@@ -328,188 +338,190 @@ async function init() {
 function drawOverlay(assignedPoses) {
   try {
     var ctx = overlayCanvas.getContext('2d');
-    if (!ctx) {
-      console.error('drawOverlay: コンテキストを取得できません');
-      return;
-    }
-    ctx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
-    if (!assignedPoses) {
-      return;
-    }
-  var w = overlayCanvas.width;
-  var h = overlayCanvas.height;
-  if (w === 0 || h === 0) {
-    console.warn('drawOverlay: canvasサイズが無効です', w, 'x', h);
-    return;
-  }
-  for (var p = 0; p < assignedPoses.length; p++) {
-    var pose = assignedPoses[p];
-    if (!pose || !pose.keypoints) {
-      continue;
-    }
-    var kp = pose.keypoints;
-    var validKeypointCount = 0;
-    var minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-    for (var i = 0; i < kp.length; i++) {
-      var k = kp[i];
-      if (!k || !k.score || k.score < MIN_KEYPOINT_SCORE) continue;
-      validKeypointCount++;
-      minX = Math.min(minX, k.x);
-      maxX = Math.max(maxX, k.x);
-      minY = Math.min(minY, k.y);
-      maxY = Math.max(maxY, k.y);
-    }
-    if (minX === Infinity || validKeypointCount < 3) {
-      continue;
-    }
-    var prevPose = previousPosePositions[p];
-    var motion = calculateMotion(prevPose, pose);
-    window.motionDetectionCount++;
-    var isMoving = motion > MOTION_THRESHOLD;
-    var baseColor = isMoving ? '#f44336' : '#4CAF50';
-    var brightColor = isMoving ? '#ff6b6b' : '#66bb6a';
-    var darkColor = isMoving ? '#c62828' : '#2e7d32';
+    if (!ctx) return;
     
-    var padding = 20;
-    var boxX = w - maxX - padding;
-    var boxY = minY - padding;
-    var boxW = maxX - minX + padding * 2;
-    var boxH = maxY - minY + padding * 2;
-    if (boxX < 0) { boxW += boxX; boxX = 0; }
-    if (boxY < 0) { boxH += boxY; boxY = 0; }
-    if (boxX + boxW > w) boxW = w - boxX;
-    if (boxY + boxH > h) boxH = h - boxY;
+    var w = overlayCanvas.width;
+    var h = overlayCanvas.height;
+    ctx.clearRect(0, 0, w, h);
     
-    // 枠を描画（角丸、影付き）
-    ctx.save();
-    ctx.shadowColor = 'rgba(0, 0, 0, 0.3)';
-    ctx.shadowBlur = 8;
-    ctx.shadowOffsetX = 2;
-    ctx.shadowOffsetY = 2;
-    ctx.strokeStyle = baseColor;
-    ctx.lineWidth = 4;
-    ctx.lineJoin = 'round';
-    var cornerRadius = 8;
-    ctx.beginPath();
-    ctx.moveTo(boxX + cornerRadius, boxY);
-    ctx.lineTo(boxX + boxW - cornerRadius, boxY);
-    ctx.quadraticCurveTo(boxX + boxW, boxY, boxX + boxW, boxY + cornerRadius);
-    ctx.lineTo(boxX + boxW, boxY + boxH - cornerRadius);
-    ctx.quadraticCurveTo(boxX + boxW, boxY + boxH, boxX + boxW - cornerRadius, boxY + boxH);
-    ctx.lineTo(boxX + cornerRadius, boxY + boxH);
-    ctx.quadraticCurveTo(boxX, boxY + boxH, boxX, boxY + boxH - cornerRadius);
-    ctx.lineTo(boxX, boxY + cornerRadius);
-    ctx.quadraticCurveTo(boxX, boxY, boxX + cornerRadius, boxY);
-    ctx.closePath();
-    ctx.stroke();
-    ctx.restore();
-    
-    // スケルトンラインを描画（太め、滑らか、グラデーション風）
-    ctx.save();
-    ctx.strokeStyle = baseColor;
-    ctx.lineWidth = 4;
+    if (!assignedPoses) return;
+    if (w === 0 || h === 0) return;
+
+    // ネオン発光エフェクトの設定
+    ctx.shadowBlur = 10;
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
-    ctx.shadowColor = baseColor;
-    ctx.shadowBlur = 6;
-    ctx.shadowOffsetX = 0;
-    ctx.shadowOffsetY = 0;
-    for (var j = 0; j < SKELETON_EDGES.length; j++) {
-      var edge = SKELETON_EDGES[j];
-      var kp1 = kp.find(function (k) { return k && k.name === edge[0]; });
-      var kp2 = kp.find(function (k) { return k && k.name === edge[1]; });
-      if (!kp1 || !kp2 || !kp1.score || !kp2.score || kp1.score < MIN_KEYPOINT_SCORE || kp2.score < MIN_KEYPOINT_SCORE) continue;
-      var x1 = w - kp1.x;
-      var y1 = kp1.y;
-      var x2 = w - kp2.x;
-      var y2 = kp2.y;
-      if (x1 < 0 || x1 > w || y1 < 0 || y1 > h) continue;
-      if (x2 < 0 || x2 > w || y2 < 0 || y2 > h) continue;
-      ctx.beginPath();
-      ctx.moveTo(x1, y1);
-      ctx.lineTo(x2, y2);
-      ctx.stroke();
-    }
-    ctx.restore();
-    
-    // キーポイント（関節）を描画（グラデーション、影付き）
-    for (var k = 0; k < kp.length; k++) {
-      var keypoint = kp[k];
-      if (!keypoint || !keypoint.score || keypoint.score < MIN_KEYPOINT_SCORE) continue;
-      var x = w - keypoint.x;
-      var y = keypoint.y;
-      if (x < 0 || x > w || y < 0 || y > h) continue;
+
+    for (var p = 0; p < assignedPoses.length; p++) {
+      var pose = assignedPoses[p];
+      if (!pose || !pose.keypoints) continue;
+      
+      var kp = pose.keypoints;
+      
+      // キーポイントを名前で引けるようにマップ化 & 座標変換 (左右反転対応)
+      var km = {};
+      var validCount = 0;
+      var minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+      for (var i = 0; i < kp.length; i++) {
+        var k = kp[i];
+        if (k && k.score && k.score >= MIN_KEYPOINT_SCORE) {
+          km[k.name] = { x: w - k.x, y: k.y }; // ここで鏡写し変換
+          validCount++;
+          minX = Math.min(minX, w - k.x);
+          maxX = Math.max(maxX, w - k.x);
+          minY = Math.min(minY, k.y);
+          maxY = Math.max(maxY, k.y);
+        }
+      }
+      
+      // 認識している点が少なすぎる場合は描画しない
+      if (validCount < 5) continue;
+
+      // 前回のフレームとの差分で動いているか判定（既存ロジック）
+      var prevPose = previousPosePositions[p];
+      var motion = calculateMotion(prevPose, pose);
+      window.motionDetectionCount++;
+      var isMoving = motion > MOTION_THRESHOLD;
+      
+      // 動いている時は発光を強く、色は判定結果や状態で変えても良いが、
+      // 基本は「プレイヤーが見やすい色」優先にする
+      ctx.shadowColor = isMoving ? 'rgba(255, 255, 255, 0.8)' : 'rgba(255, 255, 255, 0.2)';
+
+      // 動き検出に応じて色を調整（動いている時は全体を少し赤みがかる）
+      var leftColor = isMoving ? '#FF66FF' : STYLE.leftColor;
+      var rightColor = isMoving ? '#FF66FF' : STYLE.rightColor;
+      var bodyColor = isMoving ? '#FFCCCC' : STYLE.bodyColor;
+
+      // --- 描画関数定義 ---
+      function drawLimb(name1, name2, color) {
+        if (km[name1] && km[name2]) {
+          ctx.beginPath();
+          ctx.moveTo(km[name1].x, km[name1].y);
+          ctx.lineTo(km[name2].x, km[name2].y);
+          ctx.strokeStyle = color;
+          ctx.lineWidth = STYLE.lineWidth;
+          ctx.stroke();
+        }
+      }
+
+      function drawJoint(name, color) {
+        if (km[name]) {
+          ctx.beginPath();
+          ctx.arc(km[name].x, km[name].y, STYLE.jointRadius, 0, Math.PI * 2);
+          ctx.fillStyle = '#FFF'; // 関節の中心は白で光らせる
+          ctx.fill();
+          ctx.lineWidth = 2;
+          ctx.strokeStyle = color;
+          ctx.stroke();
+        }
+      }
+
+      // --- 1. ボーン（線）の描画 ---
+      
+      // 体幹
+      drawLimb('left_shoulder', 'right_shoulder', bodyColor);
+      drawLimb('left_hip', 'right_hip', bodyColor);
+      drawLimb('left_shoulder', 'left_hip', leftColor);   // 左脇腹
+      drawLimb('right_shoulder', 'right_hip', rightColor); // 右脇腹
+
+      // 左腕・左足 (Left -> Cyan)
+      drawLimb('left_shoulder', 'left_elbow', leftColor);
+      drawLimb('left_elbow', 'left_wrist', leftColor);
+      drawLimb('left_hip', 'left_knee', leftColor);
+      drawLimb('left_knee', 'left_ankle', leftColor);
+
+      // 右腕・右足 (Right -> Magenta)
+      drawLimb('right_shoulder', 'right_elbow', rightColor);
+      drawLimb('right_elbow', 'right_wrist', rightColor);
+      drawLimb('right_hip', 'right_knee', rightColor);
+      drawLimb('right_knee', 'right_ankle', rightColor);
+
+
+      // --- 2. ジョイント（関節）の描画 ---
+      ['left_shoulder', 'left_elbow', 'left_wrist', 'left_hip', 'left_knee', 'left_ankle']
+        .forEach(function(name) { drawJoint(name, leftColor); });
+      
+      ['right_shoulder', 'right_elbow', 'right_wrist', 'right_hip', 'right_knee', 'right_ankle']
+        .forEach(function(name) { drawJoint(name, rightColor); });
+
+
+      // --- 3. 頭（顔）の描画 ---
+      // 鼻、目、耳の平均座標を計算して「顔の中心」とする
+      var faceParts = ['nose', 'left_eye', 'right_eye', 'left_ear', 'right_ear'];
+      var fx = 0, fy = 0, fCount = 0;
+      for (var f = 0; f < faceParts.length; f++) {
+        var name = faceParts[f];
+        if (km[name]) {
+          fx += km[name].x;
+          fy += km[name].y;
+          fCount++;
+        }
+      }
+
+      if (fCount > 0) {
+        var faceX = fx / fCount;
+        var faceY = fy / fCount;
+
+        // 顔の円を描く
+        ctx.save();
+        ctx.shadowColor = bodyColor;
+        ctx.shadowBlur = 8;
+        ctx.beginPath();
+        ctx.arc(faceX, faceY, STYLE.headRadius, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
+        ctx.fill();
+        ctx.strokeStyle = bodyColor;
+        ctx.lineWidth = 3;
+        ctx.stroke();
+        ctx.restore();
+
+        // 顔の中にプレイヤー番号を表示
+        ctx.save();
+        ctx.fillStyle = '#333';
+        ctx.font = 'bold 20px Arial';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.shadowColor = 'rgba(255, 255, 255, 0.8)';
+        ctx.shadowBlur = 2;
+        ctx.fillText('P' + (p + 1), faceX, faceY);
+        ctx.restore();
+      }
+      
+      // 枠を描画（動き検出の視覚的フィードバック用）
+      var padding = 20;
+      var boxX = minX - padding;
+      var boxY = minY - padding;
+      var boxW = maxX - minX + padding * 2;
+      var boxH = maxY - minY + padding * 2;
+      if (boxX < 0) { boxW += boxX; boxX = 0; }
+      if (boxY < 0) { boxH += boxY; boxY = 0; }
+      if (boxX + boxW > w) boxW = w - boxX;
+      if (boxY + boxH > h) boxH = h - boxY;
       
       ctx.save();
-      var gradient = ctx.createRadialGradient(x, y, 0, x, y, 8);
-      gradient.addColorStop(0, brightColor);
-      gradient.addColorStop(0.7, baseColor);
-      gradient.addColorStop(1, darkColor);
-      ctx.fillStyle = gradient;
-      ctx.shadowColor = 'rgba(0, 0, 0, 0.4)';
-      ctx.shadowBlur = 4;
-      ctx.shadowOffsetX = 1;
-      ctx.shadowOffsetY = 1;
+      ctx.strokeStyle = isMoving ? '#f44336' : '#4CAF50';
+      ctx.lineWidth = 3;
+      ctx.shadowColor = isMoving ? 'rgba(244, 67, 54, 0.5)' : 'rgba(76, 175, 80, 0.5)';
+      ctx.shadowBlur = 8;
+      var cornerRadius = 8;
       ctx.beginPath();
-      ctx.arc(x, y, 6, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.restore();
-      
-      // 内側の白い点
-      ctx.save();
-      ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
-      ctx.beginPath();
-      ctx.arc(x, y, 3, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.restore();
-    }
-    var leftS = kp.find(function (k) { return k && k.name === 'left_shoulder'; });
-    var rightS = kp.find(function (k) { return k && k.name === 'right_shoulder'; });
-    if (leftS && rightS) {
-      var centerX = w - (leftS.x + rightS.x) / 2;
-      var labelY = Math.max(0, Math.min(leftS.y, rightS.y) - 15);
-      
-      // プレイヤーラベル（角丸、グラデーション、影付き）
-      ctx.save();
-      var labelGradient = ctx.createLinearGradient(centerX - 35, labelY - 25, centerX - 35, labelY - 5);
-      labelGradient.addColorStop(0, 'rgba(0, 0, 0, 0.8)');
-      labelGradient.addColorStop(1, 'rgba(0, 0, 0, 0.6)');
-      ctx.fillStyle = labelGradient;
-      ctx.shadowColor = 'rgba(0, 0, 0, 0.5)';
-      ctx.shadowBlur = 6;
-      ctx.shadowOffsetX = 0;
-      ctx.shadowOffsetY = 2;
-      var labelRadius = 12;
-      ctx.beginPath();
-      ctx.moveTo(centerX - 35 + labelRadius, labelY - 25);
-      ctx.lineTo(centerX + 35 - labelRadius, labelY - 25);
-      ctx.quadraticCurveTo(centerX + 35, labelY - 25, centerX + 35, labelY - 25 + labelRadius);
-      ctx.lineTo(centerX + 35, labelY - 5 - labelRadius);
-      ctx.quadraticCurveTo(centerX + 35, labelY - 5, centerX + 35 - labelRadius, labelY - 5);
-      ctx.lineTo(centerX - 35 + labelRadius, labelY - 5);
-      ctx.quadraticCurveTo(centerX - 35, labelY - 5, centerX - 35, labelY - 5 - labelRadius);
-      ctx.lineTo(centerX - 35, labelY - 25 + labelRadius);
-      ctx.quadraticCurveTo(centerX - 35, labelY - 25, centerX - 35 + labelRadius, labelY - 25);
+      ctx.moveTo(boxX + cornerRadius, boxY);
+      ctx.lineTo(boxX + boxW - cornerRadius, boxY);
+      ctx.quadraticCurveTo(boxX + boxW, boxY, boxX + boxW, boxY + cornerRadius);
+      ctx.lineTo(boxX + boxW, boxY + boxH - cornerRadius);
+      ctx.quadraticCurveTo(boxX + boxW, boxY + boxH, boxX + boxW - cornerRadius, boxY + boxH);
+      ctx.lineTo(boxX + cornerRadius, boxY + boxH);
+      ctx.quadraticCurveTo(boxX, boxY + boxH, boxX, boxY + boxH - cornerRadius);
+      ctx.lineTo(boxX, boxY + cornerRadius);
+      ctx.quadraticCurveTo(boxX, boxY, boxX + cornerRadius, boxY);
       ctx.closePath();
-      ctx.fill();
+      ctx.stroke();
       ctx.restore();
-      
-      // テキスト（太字、影付き）
-      ctx.save();
-      ctx.fillStyle = '#fff';
-      ctx.font = 'bold 16px Arial';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.shadowColor = 'rgba(0, 0, 0, 0.8)';
-      ctx.shadowBlur = 4;
-      ctx.shadowOffsetX = 1;
-      ctx.shadowOffsetY = 1;
-      ctx.fillText('P' + (p + 1), centerX, labelY - 15);
-      ctx.restore();
-      ctx.textAlign = 'left';
-      ctx.textBaseline = 'alphabetic';
     }
-  }
+    
+    // 設定を戻す
+    ctx.shadowBlur = 0;
+
   } catch (err) {
     console.error('drawOverlay error', err);
   }
