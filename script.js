@@ -329,11 +329,15 @@ function drawOverlay(assignedPoses) {
     var isMoving = motion > MOTION_THRESHOLD;
     var color = isMoving ? '#f44336' : '#4CAF50';
     var padding = 20;
-    var boxX = minX - padding;
+    var boxX = w - maxX - padding;
     var boxY = minY - padding;
     var boxW = maxX - minX + padding * 2;
     var boxH = maxY - minY + padding * 2;
-    console.log('drawOverlay: プレイヤー' + p + ' - 枠を描画:', boxX, boxY, boxW, boxH, '色:', color);
+    if (boxX < 0) { boxW += boxX; boxX = 0; }
+    if (boxY < 0) { boxH += boxY; boxY = 0; }
+    if (boxX + boxW > w) boxW = w - boxX;
+    if (boxY + boxH > h) boxH = h - boxY;
+    console.log('drawOverlay: プレイヤー' + p + ' - 枠を描画:', boxX, boxY, boxW, boxH, '色:', color, 'canvas:', w, 'x', h);
     ctx.strokeStyle = color;
     ctx.lineWidth = 3;
     ctx.strokeRect(boxX, boxY, boxW, boxH);
@@ -344,23 +348,32 @@ function drawOverlay(assignedPoses) {
       var kp1 = kp.find(function (k) { return k && k.name === edge[0]; });
       var kp2 = kp.find(function (k) { return k && k.name === edge[1]; });
       if (!kp1 || !kp2 || !kp1.score || !kp2.score || kp1.score < MIN_KEYPOINT_SCORE || kp2.score < MIN_KEYPOINT_SCORE) continue;
+      var x1 = w - kp1.x;
+      var y1 = kp1.y;
+      var x2 = w - kp2.x;
+      var y2 = kp2.y;
+      if (x1 < 0 || x1 > w || y1 < 0 || y1 > h) continue;
+      if (x2 < 0 || x2 > w || y2 < 0 || y2 > h) continue;
       ctx.beginPath();
-      ctx.moveTo(kp1.x, kp1.y);
-      ctx.lineTo(kp2.x, kp2.y);
+      ctx.moveTo(x1, y1);
+      ctx.lineTo(x2, y2);
       ctx.stroke();
     }
     ctx.fillStyle = color;
     for (var k = 0; k < kp.length; k++) {
       var keypoint = kp[k];
       if (!keypoint || !keypoint.score || keypoint.score < MIN_KEYPOINT_SCORE) continue;
+      var x = w - keypoint.x;
+      var y = keypoint.y;
+      if (x < 0 || x > w || y < 0 || y > h) continue;
       ctx.beginPath();
-      ctx.arc(keypoint.x, keypoint.y, 4, 0, Math.PI * 2);
+      ctx.arc(x, y, 4, 0, Math.PI * 2);
       ctx.fill();
     }
     var leftS = kp.find(function (k) { return k && k.name === 'left_shoulder'; });
     var rightS = kp.find(function (k) { return k && k.name === 'right_shoulder'; });
     if (leftS && rightS) {
-      var centerX = (leftS.x + rightS.x) / 2;
+      var centerX = w - (leftS.x + rightS.x) / 2;
       var labelY = Math.max(0, Math.min(leftS.y, rightS.y) - 10);
       ctx.fillStyle = 'rgba(0,0,0,0.6)';
       ctx.fillRect(centerX - 30, labelY - 20, 60, 20);
